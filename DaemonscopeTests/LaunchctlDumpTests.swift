@@ -170,6 +170,95 @@ struct DomainListingTamperTests {
     }
 }
 
+/// What `launchctl print gui/501` showed for an agent whose Label contained a newline: launchd prints it
+/// unescaped, so the rest of the label became a second, fake row.
+private let guiPrintWithInjectedRow = """
+gui/501 = {
+	services = {
+		       0      - 	dev.attacker.labeltest
+		   12345      - 	com.fake.row
+		     777   (pe) 	com.example.agent
+	}
+
+	disabled services = {
+	}
+}
+"""
+
+/// The matching dump: the attacker's block header is split across lines, so neither half gets a block.
+private let dumpForInjectedRow = """
+gui/501/dev.attacker.labeltest
+		   12345      - 	com.fake.row = {
+	state = not running
+}
+
+gui/501/com.example.agent = {
+	path = /Library/LaunchAgents/com.example.agent.plist
+	state = running
+}
+"""
+
+struct ListingInjectionTests {
+    @Test func listedLabelsWithoutADumpBlockAreSuspect() throws {
+        let listing = try #require(DomainListing.parse(guiPrintWithInjectedRow, domain: "gui/501"))
+        let snapshot = LoadedSnapshot.build(
+            listings: ["gui/501": listing],
+            details: LaunchctlDump.serviceBlocks(dumpForInjectedRow, domains: ["gui/501"]))
+
+        let fake = try #require(snapshot.jobs.first { $0.label == "com.fake.row" })
+        #expect(fake.rowSuspect)
+        #expect(fake.pid == nil)
+        #expect(!fake.isRunning)
+        #expect(snapshot.jobs.first { $0.label == "dev.attacker.labeltest" }?.rowSuspect == true)
+
+        let genuine = try #require(snapshot.jobs.first { $0.label == "com.example.agent" })
+        #expect(!genuine.rowSuspect)
+        #expect(genuine.pid == 777)
+    }
+
+    @Test func withoutADumpRowsCantBeVerifiedAndStayTrusted() throws {
+        let listing = try #require(DomainListing.parse(guiPrintWithInjectedRow, domain: "gui/501"))
+        let snapshot = LoadedSnapshot.build(listings: ["gui/501": listing], details: nil)
+        #expect(snapshot.jobs.allSatisfy { !$0.rowSuspect })
+    }
+
+    @Test func duplicateLabelRowsAreSuspect() throws {
+        let text = "system = {\n\tservices = {\n\t\t   12345      - \tcom.example.a\n\t\t       0      0 \tcom.example.a\n\t}\n}\n"
+        let listing = try #require(DomainListing.parse(text, domain: "system"))
+        let job = try #require(LoadedSnapshot.build(listings: ["system": listing], details: nil).jobs.first)
+        #expect(job.rowSuspect)
+        #expect(job.pid == nil)
+    }
+
+    @Test func repeatedSectionsBreakTheListing() throws {
+        // A label can close the services section and open a fake disabled list.
+        let text = """
+        gui/501 = {
+        	services = {
+        		       0      - 	dev.attacker.x
+        	}
+        	disabled services = {
+        		"com.example.victim" => disabled
+        	}
+        	disabled services = {
+        	}
+        }
+        """
+        let listing = try #require(DomainListing.parse(text, domain: "gui/501"))
+        #expect(!listing.isStructurallySound)
+    }
+
+    @Test func malformedRowsBreakTheListing() throws {
+        let text = "gui/501 = {\n\tservices = {\n\t\tnot a row at all\n\t}\n}\n"
+        let listing = try #require(DomainListing.parse(text, domain: "gui/501"))
+        #expect(!listing.isStructurallySound)
+    }
+
+    @Test func wellFormedListingIsSound() throws {
+        #expect(try #require(DomainListing.parse(guiPrintWithInjectedRow, domain: "gui/501")).isStructurallySound)
+    }
+}
+
 struct DumpFieldOrderTests {
     @Test func fieldsAfterTheFirstNestedBlockAreIgnored() throws {
         // A job's arguments and environment are printed in nested blocks, unescaped. Anything that looks like a

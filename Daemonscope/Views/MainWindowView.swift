@@ -319,7 +319,12 @@ private struct JobDetailView: View {
 
     private func launchdSection(_ loaded: LoadedJob) -> some View {
         Section("launchd") {
-            if loaded.detailsTampered {
+            if loaded.rowSuspect {
+                Label("launchd's listing for this job couldn't be confirmed, so it may have been forged by another job's label. Its state is shown as unknown.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.caption)
+            } else if loaded.detailsTampered {
                 Label("launchd's dump held conflicting entries for this job, so another job may be trying to impersonate it. Only the PID and loaded state, which come from the domain listing, are shown.",
                       systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
@@ -406,7 +411,7 @@ private extension JobState {
         case .loadedNotRunning: "Loaded but idle. Many jobs start on demand, so this isn't necessarily a fault."
         case .disabled: "Not loaded, and disabled by launchd's override database or the plist's Disabled key."
         case .foundOnDisk: "The plist exists, but launchd doesn't report the job as loaded in the domain Daemonscope checked."
-        case .unknown: "launchd couldn't be queried, so whether this job is loaded isn't known."
+        case .unknown: "launchd couldn't be queried, or its answer for this job couldn't be trusted, so whether it's loaded isn't known."
         }
     }
 }

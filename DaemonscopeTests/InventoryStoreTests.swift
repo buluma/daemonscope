@@ -122,6 +122,21 @@ struct LaunchctlCollectorTests {
         #expect(snapshot.issues.first?.contains("user/501") == true)
     }
 
+    @Test func structurallyBrokenListingCountsAsFailedDomain() throws {
+        let collector = LaunchctlCollector(uid: 501) { arguments in
+            switch arguments {
+            case ["print", "system"]: return Self.systemListing
+            case ["print", "gui/501"]:
+                return "gui/501 = {\n\tservices = {\n\t}\n\tservices = {\n\t}\n}\n"
+            case ["print", "user/501"]: return Self.guiListing.replacingOccurrences(of: "gui/501", with: "user/501")
+            default: return "system/com.example.a = {\n\tpath = /Library/LaunchDaemons/a.plist\n}\n"
+            }
+        }
+        let snapshot = try collector.collect()
+        #expect(snapshot.queriedDomains == ["system", "user/501"])
+        #expect(snapshot.issues.contains { $0.contains("gui/501") })
+    }
+
     @Test func dumpstateFailureKeepsListingsAndReportsIt() throws {
         let collector = LaunchctlCollector(uid: 501) { arguments in
             if arguments == ["dumpstate"] { throw LaunchctlCollector.CollectError.timedOut }
