@@ -101,16 +101,42 @@ struct InventoryStoreTests {
 }
 
 struct LaunchctlCollectorTests {
-    @Test func unrecognizedOutputIsAnError() {
-        let collector = LaunchctlCollector(uid: 501) { "Usage: launchctl <subcommand>\n" }
-        #expect(throws: LaunchctlCollector.CollectError.unrecognizedOutput) { try collector.collect() }
+    private static let systemListing = "system = {\n\tservices = {\n\t\t     612      - \tcom.example.a\n\t}\n}\n"
+    private static let guiListing = "gui/501 = {\n\tservices = {\n\t}\n}\n"
+
+    @Test func collectsListingsAndDetails() throws {
+        let collector = LaunchctlCollector(uid: 501) { arguments in
+            switch arguments {
+            case ["print", "system"]: return Self.systemListing
+            case ["print", "gui/501"]: return Self.guiListing
+            case ["print", "user/501"]: throw LaunchctlCollector.CollectError.exited(113, "Could not find domain")
+            case ["dumpstate"]: return "system/com.example.a = {\n\tpath = /Library/LaunchDaemons/a.plist\n}\n"
+            default: throw LaunchctlCollector.CollectError.unrecognizedOutput
+            }
+        }
+        let snapshot = try collector.collect()
+        #expect(snapshot.jobs.map(\.label) == ["com.example.a"])
+        #expect(snapshot.jobs.first?.path == "/Library/LaunchDaemons/a.plist")
+        #expect(snapshot.queriedDomains == ["system", "gui/501"])
+        #expect(snapshot.issues.count == 1)
+        #expect(snapshot.issues.first?.contains("user/501") == true)
     }
 
-    @Test func recognizedOutputParses() throws {
-        let collector = LaunchctlCollector(uid: 501) {
-            "gui/501 = {\n\tdisabled services = {\n\t}\n}\n\ngui/501/com.example.a = {\n\tstate = running\n}\n"
+    @Test func dumpstateFailureKeepsListingsAndReportsIt() throws {
+        let collector = LaunchctlCollector(uid: 501) { arguments in
+            if arguments == ["dumpstate"] { throw LaunchctlCollector.CollectError.timedOut }
+            return arguments == ["print", "system"] ? Self.systemListing : Self.guiListing.replacingOccurrences(
+                of: "gui/501", with: arguments[1])
         }
-        #expect(try collector.collect().jobs.map(\.label) == ["com.example.a"])
+        let snapshot = try collector.collect()
+        #expect(snapshot.jobs.first?.isRunning == true)
+        #expect(snapshot.jobs.first?.path == nil)
+        #expect(snapshot.issues.count == 1)
+    }
+
+    @Test func noDomainListedIsAnError() {
+        let collector = LaunchctlCollector(uid: 501) { _ in "Usage: launchctl <subcommand>\n" }
+        #expect(throws: LaunchctlCollector.CollectError.self) { try collector.collect() }
     }
 
     @Test func runReportsNonZeroExit() {

@@ -124,9 +124,11 @@ struct DiskJobParsingTests {
 
     @Test(arguments: [
         ("/System/Library/LaunchDaemons/foo.plist", "org.example.foo", true),
-        ("/Library/LaunchDaemons/foo.plist", "com.apple.foo", true),
+        ("/Library/Apple/System/Library/LaunchDaemons/foo.plist", "com.apple.foo", true),
+        // Anyone with admin rights can name a job com.apple.*; only SIP-protected locations count.
+        ("/Library/LaunchDaemons/com.apple.foo.plist", "com.apple.foo", false),
         ("/Library/LaunchDaemons/foo.plist", "com.example.foo", false),
-        ("/Library/LaunchDaemons/foo.plist", "com.applesauce.foo", false),
+        ("/Library/AppleSauce/foo.plist", "com.example.foo", false),
     ])
     func appleJobDetection(path: String, label: String, expected: Bool) throws {
         let data = try PropertyListSerialization.data(fromPropertyList: ["Label": label], format: .xml, options: 0)

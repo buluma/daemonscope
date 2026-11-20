@@ -19,100 +19,70 @@ struct LoadedJob: Sendable, Hashable {
     let lastExit: String?
     /// The app that registered the job, for jobs submitted through Service Management.
     let parentBundleID: String?
+    /// The dump held more than one block for this job, so someone wrote fake ones. The details from the dump
+    /// were dropped; what's left comes from the domain listing.
+    var detailsTampered = false
 
-    var isRunning: Bool { state == "running" }
+    /// From the domain listing's PID column, not the dump, so another job can't fake it.
+    var isRunning: Bool { pid != nil }
 }
 
-struct LoadedSnapshot: Sendable {
-    let jobs: [LoadedJob]
-    /// Domain → label → `true` when launchd's override database says disabled, `false` when it says enabled.
-    let disabled: [String: [String: Bool]]
-}
-
-/// Parses `launchctl dumpstate` output.
+/// One domain as `launchctl print <domain>` lists it.
 ///
-/// Only the service blocks' top-level fields and each domain's `disabled services` list are read. Nested blocks,
-/// which include environment variables, are skipped without being stored.
-enum LaunchctlDump {
-    static func domains(uid: uid_t) -> Set<String> {
-        ["system", "user/\(uid)", "gui/\(uid)"]
+/// This listing is the authority for which jobs are loaded, their PIDs and the disabled overrides. Unlike
+/// `dumpstate`, it doesn't include any job's arguments or environment, so one job can't forge lines that look
+/// like another job's entry.
+struct DomainListing: Sendable, Equatable {
+    struct Service: Sendable, Equatable {
+        /// `nil` when the PID column is 0 (not running).
+        let pid: Int?
+        /// The status column as printed: a last exit status, `-`, or a marker such as `(pe)`.
+        let status: String
     }
 
-    static func parse(_ text: String, uid: uid_t) -> LoadedSnapshot {
-        let wanted = domains(uid: uid)
-        var jobs: [LoadedJob] = []
-        var disabled: [String: [String: Bool]] = [:]
+    var services: [String: Service]
+    var disabled: [String: Bool]
 
-        enum Block {
-            case none
-            case domain(String)
-            case service(domain: String, label: String, fields: [String: String])
-            case skipped
-        }
-        var block = Block.none
-        var inDisabledList = false
+    /// `nil` unless `text` is `launchctl print` output for `domain`.
+    static func parse(_ text: String, domain: String) -> DomainListing? {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard lines.first == "\(domain) = {" else { return nil }
 
-        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = String(rawLine)
+        var services: [String: Service] = [:]
+        var disabled: [String: Bool] = [:]
+        enum Section { case none, services, disabled }
+        var section = Section.none
 
-            // Top-level block start: "<name> = {" at column 0.
-            if !line.hasPrefix("\t"), line.hasSuffix(" = {") {
-                let name = String(line.dropLast(4))
-                inDisabledList = false
-                if wanted.contains(name) {
-                    block = .domain(name)
-                    disabled[name, default: [:]] = disabled[name] ?? [:]
-                } else if let (domain, label) = splitServiceName(name, wanted: wanted) {
-                    block = .service(domain: domain, label: label, fields: [:])
-                } else {
-                    block = .skipped
+        for line in lines.dropFirst() {
+            switch section {
+            case .none:
+                if line == "\tservices = {" { section = .services }
+                else if line == "\tdisabled services = {" { section = .disabled }
+            case .services, .disabled:
+                if line == "\t}" {
+                    section = .none
+                    continue
                 }
-                continue
-            }
-
-            if line == "}" {
-                if case .service(let domain, let label, let fields) = block {
-                    jobs.append(makeJob(domain: domain, label: label, fields: fields))
+                guard line.hasPrefix("\t\t"), !line.hasPrefix("\t\t\t") else { continue }
+                if section == .services, let (label, service) = parseServiceRow(line) {
+                    services[label] = service
+                } else if section == .disabled, let (label, isDisabled) = parseDisabledEntry(line) {
+                    disabled[label] = isDisabled
                 }
-                block = .none
-                inDisabledList = false
-                continue
-            }
-
-            switch block {
-            case .domain(let name):
-                if line == "\tdisabled services = {" {
-                    inDisabledList = true
-                } else if inDisabledList, line == "\t}" {
-                    inDisabledList = false
-                } else if inDisabledList, let (label, isDisabled) = parseDisabledEntry(line) {
-                    disabled[name, default: [:]][label] = isDisabled
-                }
-            case .service(let domain, let label, var fields):
-                // Only one tab deep: deeper lines belong to nested blocks (environment, endpoints, …).
-                guard line.hasPrefix("\t"), !line.hasPrefix("\t\t") else { continue }
-                let body = line.dropFirst()
-                guard let range = body.range(of: " = "), !body.hasSuffix("{") else { continue }
-                let key = String(body[..<range.lowerBound])
-                if fields[key] == nil {
-                    fields[key] = String(body[range.upperBound...])
-                    block = .service(domain: domain, label: label, fields: fields)
-                }
-            case .none, .skipped:
-                continue
             }
         }
-
-        return LoadedSnapshot(jobs: jobs, disabled: disabled)
+        return DomainListing(services: services, disabled: disabled)
     }
 
-    /// "gui/501/com.example.job" → ("gui/501", "com.example.job"), only for wanted domains. Labels may contain "/".
-    private static func splitServiceName(_ name: String, wanted: Set<String>) -> (String, String)? {
-        for domain in wanted where name.hasPrefix(domain + "/") {
-            let label = String(name.dropFirst(domain.count + 1))
-            return label.isEmpty ? nil : (domain, label)
-        }
-        return nil
+    /// `\t\t     612      - \tcom.example.job`: PID, status, then a tab before the label.
+    private static func parseServiceRow(_ line: String) -> (String, Service)? {
+        let columns = line.split(separator: "\t", omittingEmptySubsequences: true)
+        guard columns.count == 2 else { return nil }
+        let numbers = columns[0].split(separator: " ", omittingEmptySubsequences: true)
+        guard numbers.count == 2, let pid = Int(numbers[0]) else { return nil }
+        let label = columns[1].trimmingCharacters(in: .whitespaces)
+        guard !label.isEmpty else { return nil }
+        return (label, Service(pid: pid == 0 ? nil : pid, status: String(numbers[1])))
     }
 
     /// `\t\t"com.example.job" => disabled`
@@ -120,27 +90,116 @@ enum LaunchctlDump {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         guard trimmed.hasPrefix("\""), let close = trimmed.dropFirst().firstIndex(of: "\"") else { return nil }
         let label = String(trimmed[trimmed.index(after: trimmed.startIndex)..<close])
-        let rest = trimmed[trimmed.index(after: close)...].trimmingCharacters(in: .whitespaces)
-        switch rest {
+        switch trimmed[trimmed.index(after: close)...].trimmingCharacters(in: .whitespaces) {
         case "=> disabled": return (label, true)
         case "=> enabled": return (label, false)
         default: return nil
         }
     }
+}
 
-    private static func makeJob(domain: String, label: String, fields: [String: String]) -> LoadedJob {
-        let rawPath = fields["path"]
-        let isFile = rawPath?.hasPrefix("/") ?? false
-        return LoadedJob(
-            domain: domain,
-            label: label,
-            path: isFile ? rawPath : nil,
-            submittedBy: isFile ? nil : rawPath,
-            type: fields["type"],
-            state: fields["state"],
-            pid: fields["pid"].flatMap { Int($0) },
-            program: fields["program"],
-            lastExit: fields["last exit code"],
-            parentBundleID: fields["parent bundle identifier"])
+struct LoadedSnapshot: Sendable {
+    let jobs: [LoadedJob]
+    /// Domain → label → `true` when launchd's override database says disabled, `false` when it says enabled.
+    let disabled: [String: [String: Bool]]
+    /// Domains that answered. `nil` means every domain did (used by tests that don't care).
+    let queriedDomains: Set<String>?
+    /// Partial failures, such as a domain that couldn't be listed or a missing dump.
+    let issues: [String]
+
+    init(jobs: [LoadedJob], disabled: [String: [String: Bool]], queriedDomains: Set<String>? = nil, issues: [String] = []) {
+        self.jobs = jobs
+        self.disabled = disabled
+        self.queriedDomains = queriedDomains
+        self.issues = issues
+    }
+
+    /// Jobs and disabled lists come from `listings`. `details` (parsed `dumpstate` blocks, or `nil` without a
+    /// dump) only add fields to jobs a listing already names, and only when the dump holds exactly one block
+    /// for that job.
+    static func build(
+        listings: [String: DomainListing], details: [ServiceKey: [[String: String]]]?, issues: [String] = []
+    ) -> LoadedSnapshot {
+        var jobs: [LoadedJob] = []
+        for (domain, listing) in listings.sorted(by: { $0.key < $1.key }) {
+            for (label, service) in listing.services.sorted(by: { $0.key < $1.key }) {
+                let blocks = details?[ServiceKey(domain: domain, label: label)] ?? []
+                let fields = blocks.count == 1 ? blocks[0] : [:]
+                let rawPath = fields["path"]
+                let isFile = rawPath?.hasPrefix("/") ?? false
+                jobs.append(LoadedJob(
+                    domain: domain,
+                    label: label,
+                    path: isFile ? rawPath : nil,
+                    submittedBy: isFile ? nil : rawPath,
+                    type: fields["type"],
+                    state: fields["state"],
+                    pid: service.pid,
+                    program: fields["program"],
+                    lastExit: fields["last exit code"] ?? (service.status == "-" ? nil : service.status),
+                    parentBundleID: fields["parent bundle identifier"],
+                    detailsTampered: blocks.count > 1))
+            }
+        }
+        return LoadedSnapshot(
+            jobs: jobs, disabled: listings.mapValues(\.disabled), queriedDomains: Set(listings.keys), issues: issues)
+    }
+}
+
+struct ServiceKey: Hashable, Sendable {
+    let domain: String
+    let label: String
+}
+
+/// Reads service blocks out of `launchctl dumpstate` output.
+///
+/// The dump isn't trustworthy on its own: launchd doesn't escape newlines in a job's arguments or environment,
+/// so a job's owner can print lines that look like any other job's block. Every block is therefore collected
+/// per job, and `LoadedSnapshot.build` uses one only when it's the single block for a job a domain listing
+/// names. Nested blocks (environment, endpoints, …) are skipped without being stored.
+enum LaunchctlDump {
+    static func serviceBlocks(_ text: String, domains: Set<String>) -> [ServiceKey: [[String: String]]] {
+        var blocks: [ServiceKey: [[String: String]]] = [:]
+        var current: (key: ServiceKey, fields: [String: String])?
+
+        func finish() {
+            if let current { blocks[current.key, default: []].append(current.fields) }
+            current = nil
+        }
+
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(rawLine)
+
+            if !line.hasPrefix("\t"), line.hasSuffix(" = {") {
+                finish()
+                if let key = serviceKey(String(line.dropLast(4)), domains: domains) {
+                    current = (key, [:])
+                }
+                continue
+            }
+            if line == "}" {
+                finish()
+                continue
+            }
+            // Only one tab deep: deeper lines belong to nested blocks.
+            guard current != nil, line.hasPrefix("\t"), !line.hasPrefix("\t\t") else { continue }
+            let body = line.dropFirst()
+            guard let range = body.range(of: " = "), !body.hasSuffix("{") else { continue }
+            let key = String(body[..<range.lowerBound])
+            if current?.fields[key] == nil {
+                current?.fields[key] = String(body[range.upperBound...])
+            }
+        }
+        finish()
+        return blocks
+    }
+
+    /// "gui/501/com.example.job" → (gui/501, com.example.job), only for wanted domains. Labels may contain "/".
+    private static func serviceKey(_ name: String, domains: Set<String>) -> ServiceKey? {
+        for domain in domains where name.hasPrefix(domain + "/") {
+            let label = String(name.dropFirst(domain.count + 1))
+            return label.isEmpty ? nil : ServiceKey(domain: domain, label: label)
+        }
+        return nil
     }
 }

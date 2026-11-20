@@ -72,9 +72,14 @@ struct DiskJob: Identifiable, Sendable, Hashable, CustomStringConvertible {
         return programArguments.first
     }
 
-    /// Apple's own jobs, hidden by default in the UI.
+    /// Apple's own jobs, hidden by default in the UI. Decided by location only: System Integrity Protection
+    /// guards these folders, while anyone with admin rights can give a job a `com.apple.*` label to hide it.
     var isApple: Bool {
-        path.hasPrefix("/System/Library/") || (label?.hasPrefix("com.apple.") ?? false)
+        Self.isSIPProtected(path)
+    }
+
+    static func isSIPProtected(_ path: String) -> Bool {
+        path.hasPrefix("/System/Library/") || path.hasPrefix("/Library/Apple/")
     }
 
     var description: String {

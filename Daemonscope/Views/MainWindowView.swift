@@ -189,6 +189,11 @@ private struct JobTableView: View {
                     .foregroundStyle(.orange)
                     .help(error)
             }
+            if !store.loadedIssues.isEmpty {
+                Label("\(store.loadedIssues.count) launchd warnings", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                    .help(store.loadedIssues.joined(separator: "\n"))
+            }
             if store.isRefreshing { ProgressView().controlSize(.small) }
             Spacer()
         }
@@ -314,6 +319,12 @@ private struct JobDetailView: View {
 
     private func launchdSection(_ loaded: LoadedJob) -> some View {
         Section("launchd") {
+            if loaded.detailsTampered {
+                Label("launchd's dump held conflicting entries for this job, so another job may be trying to impersonate it. Only the PID and loaded state, which come from the domain listing, are shown.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.caption)
+            }
             LabeledContent("Domain", value: loaded.domain)
             if let state = loaded.state { LabeledContent("Reported State", value: state) }
             if let pid = loaded.pid { LabeledContent("PID", value: String(pid)) }

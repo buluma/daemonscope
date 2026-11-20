@@ -148,16 +148,32 @@ struct JobInventoryTests {
         #expect(entries.only?.state == .unknown)
     }
 
-    @Test func appleDetectionCoversLoadedOnlyJobs() {
+    @Test func appleDetectionUsesOnlySIPProtectedPaths() {
         let entries = JobInventory.merge(
             disk: [],
             loaded: LoadedSnapshot(jobs: [
+                // A com.apple.* label alone proves nothing: any admin can pick it.
                 loaded("com.apple.thing", path: nil),
+                loaded("com.apple.fake", path: "/Library/LaunchDaemons/com.apple.fake.plist"),
                 loaded("org.example.sys", path: "/System/Library/LaunchDaemons/x.plist"),
+                loaded("com.apple.extra", path: "/Library/Apple/System/Library/LaunchDaemons/y.plist"),
                 loaded("com.example.mine", path: nil),
             ], disabled: [:]),
             uid: 501)
-        #expect(entries.filter(\.isApple).compactMap(\.label).sorted() == ["com.apple.thing", "org.example.sys"])
+        #expect(entries.filter(\.isApple).compactMap(\.label).sorted() == ["com.apple.extra", "org.example.sys"])
+    }
+
+    @Test func diskJobsOutsideQueriedDomainsAreUnknown() {
+        let entries = JobInventory.merge(
+            disk: [
+                disk("com.example.daemon", path: "/Library/LaunchDaemons/d.plist", location: .globalDaemons),
+                disk("com.example.agent", path: "/Library/LaunchAgents/a.plist", location: .globalAgents),
+            ],
+            // Only the gui domain answered; system couldn't be listed.
+            loaded: LoadedSnapshot(jobs: [], disabled: ["gui/501": [:]], queriedDomains: ["gui/501"]),
+            uid: 501)
+        #expect(entries.first { $0.disk?.label == "com.example.daemon" }?.state == .unknown)
+        #expect(entries.first { $0.disk?.label == "com.example.agent" }?.state == .foundOnDisk)
     }
 
     @Test func idsAreUnique() {

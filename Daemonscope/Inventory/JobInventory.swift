@@ -42,8 +42,8 @@ struct InventoryEntry: Identifiable, Sendable, Hashable {
 
     var isApple: Bool {
         if disk?.isApple == true { return true }
-        guard let loaded else { return false }
-        return loaded.label.hasPrefix("com.apple.") || (loaded.path?.hasPrefix("/System/Library/") ?? false)
+        // Location only, as for plists: a com.apple.* label proves nothing.
+        return loaded?.path.map(DiskJob.isSIPProtected) ?? false
     }
 }
 
@@ -79,8 +79,14 @@ enum JobInventory {
         }
 
         for job in disk where !matchedPaths.contains(job.path) {
+            let expected = expectedDomains(for: job.location, uid: uid)
+            // If none of the domains this job would load in answered, "not loaded" can't be claimed.
+            if let queried = loaded.queriedDomains, queried.isDisjoint(with: expected) {
+                entries.append(InventoryEntry(disk: job, loaded: nil, disabledOverride: nil, state: .unknown))
+                continue
+            }
             let override = job.label.flatMap { label in
-                expectedDomains(for: job.location, uid: uid).lazy.compactMap { loaded.disabled[$0]?[label] }.first
+                expected.lazy.compactMap { loaded.disabled[$0]?[label] }.first
             }
             // launchd's override database wins over the plist's own Disabled key.
             let isDisabled = override ?? job.disabledInPlist ?? false

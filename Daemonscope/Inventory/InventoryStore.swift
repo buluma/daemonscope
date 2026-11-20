@@ -18,6 +18,10 @@ final class InventoryStore {
     private(set) var loadedError: String?
     private(set) var isRefreshing = false
 
+    /// Partial problems in the launchd snapshot in use: a domain that couldn't be listed, missing details, or
+    /// conflicting (forged) dump entries.
+    var loadedIssues: [String] { loaded?.issues ?? [] }
+
     private var loaded: LoadedSnapshot?
     private let discovery: PlistDiscovery
     private let collector: LaunchctlCollector
