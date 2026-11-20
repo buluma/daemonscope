@@ -42,6 +42,9 @@ struct DomainListing: Sendable, Equatable {
 
     var services: [String: Service]
     var disabled: [String: Bool]
+    /// Labels listed more than once. launchd lists each label once per domain, so a repeat means someone forged
+    /// a row; the first row is kept and the job is flagged.
+    var suspectLabels: Set<String> = []
 
     /// `nil` unless `text` is `launchctl print` output for `domain`.
     static func parse(_ text: String, domain: String) -> DomainListing? {
@@ -50,6 +53,7 @@ struct DomainListing: Sendable, Equatable {
 
         var services: [String: Service] = [:]
         var disabled: [String: Bool] = [:]
+        var suspect: Set<String> = []
         enum Section { case none, services, disabled }
         var section = Section.none
 
@@ -65,13 +69,17 @@ struct DomainListing: Sendable, Equatable {
                 }
                 guard line.hasPrefix("\t\t"), !line.hasPrefix("\t\t\t") else { continue }
                 if section == .services, let (label, service) = parseServiceRow(line) {
-                    services[label] = service
+                    if services[label] == nil {
+                        services[label] = service
+                    } else {
+                        suspect.insert(label)
+                    }
                 } else if section == .disabled, let (label, isDisabled) = parseDisabledEntry(line) {
                     disabled[label] = isDisabled
                 }
             }
         }
-        return DomainListing(services: services, disabled: disabled)
+        return DomainListing(services: services, disabled: disabled, suspectLabels: suspect)
     }
 
     /// `\t\t     612      - \tcom.example.job`: PID, status, then a tab before the label.
@@ -81,7 +89,9 @@ struct DomainListing: Sendable, Equatable {
         let numbers = columns[0].split(separator: " ", omittingEmptySubsequences: true)
         guard numbers.count == 2, let pid = Int(numbers[0]) else { return nil }
         let label = columns[1].trimmingCharacters(in: .whitespaces)
-        guard !label.isEmpty else { return nil }
+        // Control characters have no business in a label and are the raw material for faking rows.
+        guard !label.isEmpty, !label.unicodeScalars.contains(where: { $0.properties.generalCategory == .control })
+        else { return nil }
         return (label, Service(pid: pid == 0 ? nil : pid, status: String(numbers[1])))
     }
 
@@ -124,7 +134,8 @@ struct LoadedSnapshot: Sendable {
         for (domain, listing) in listings.sorted(by: { $0.key < $1.key }) {
             for (label, service) in listing.services.sorted(by: { $0.key < $1.key }) {
                 let blocks = details?[ServiceKey(domain: domain, label: label)] ?? []
-                let fields = blocks.count == 1 ? blocks[0] : [:]
+                let tampered = blocks.count > 1 || listing.suspectLabels.contains(label)
+                let fields = !tampered && blocks.count == 1 ? blocks[0] : [:]
                 let rawPath = fields["path"]
                 let isFile = rawPath?.hasPrefix("/") ?? false
                 jobs.append(LoadedJob(
@@ -136,9 +147,10 @@ struct LoadedSnapshot: Sendable {
                     state: fields["state"],
                     pid: service.pid,
                     program: fields["program"],
-                    lastExit: fields["last exit code"] ?? (service.status == "-" ? nil : service.status),
+                    // From the listing: the dump prints `last exit code` after nested blocks, where a job can forge it.
+                    lastExit: service.status == "-" ? nil : service.status,
                     parentBundleID: fields["parent bundle identifier"],
-                    detailsTampered: blocks.count > 1))
+                    detailsTampered: tampered))
             }
         }
         return LoadedSnapshot(
@@ -156,11 +168,14 @@ struct ServiceKey: Hashable, Sendable {
 /// The dump isn't trustworthy on its own: launchd doesn't escape newlines in a job's arguments or environment,
 /// so a job's owner can print lines that look like any other job's block. Every block is therefore collected
 /// per job, and `LoadedSnapshot.build` uses one only when it's the single block for a job a domain listing
-/// names. Nested blocks (environment, endpoints, …) are skipped without being stored.
+/// names. Within a block, only fields printed before the first nested block (arguments, environment, …) are
+/// read: anything after it may have been written by the job itself. launchd prints path, type, state,
+/// program and parent bundle identifier before any nested block (checked on macOS 27.3).
 enum LaunchctlDump {
     static func serviceBlocks(_ text: String, domains: Set<String>) -> [ServiceKey: [[String: String]]] {
         var blocks: [ServiceKey: [[String: String]]] = [:]
         var current: (key: ServiceKey, fields: [String: String])?
+        var pastFirstNestedBlock = false
 
         func finish() {
             if let current { blocks[current.key, default: []].append(current.fields) }
@@ -174,6 +189,7 @@ enum LaunchctlDump {
                 finish()
                 if let key = serviceKey(String(line.dropLast(4)), domains: domains) {
                     current = (key, [:])
+                    pastFirstNestedBlock = false
                 }
                 continue
             }
@@ -182,9 +198,13 @@ enum LaunchctlDump {
                 continue
             }
             // Only one tab deep: deeper lines belong to nested blocks.
-            guard current != nil, line.hasPrefix("\t"), !line.hasPrefix("\t\t") else { continue }
+            guard current != nil, !pastFirstNestedBlock, line.hasPrefix("\t"), !line.hasPrefix("\t\t") else { continue }
             let body = line.dropFirst()
-            guard let range = body.range(of: " = "), !body.hasSuffix("{") else { continue }
+            if body.hasSuffix("{") {
+                pastFirstNestedBlock = true
+                continue
+            }
+            guard let range = body.range(of: " = ") else { continue }
             let key = String(body[..<range.lowerBound])
             if current?.fields[key] == nil {
                 current?.fields[key] = String(body[range.upperBound...])
