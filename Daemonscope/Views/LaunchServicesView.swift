@@ -20,6 +20,7 @@ struct LaunchServicesView: View {
 
     @State private var mode = Mode.apps
     @State private var query = ""
+    @State private var onlyWithAssociations = false
 
     var body: some View {
         Group {
@@ -41,11 +42,7 @@ struct LaunchServicesView: View {
     // MARK: Tables
 
     private var apps: [AppRecord] {
-        let all = store.scan?.apps ?? []
-        guard !query.isEmpty else { return all }
-        return all.filter { app in
-            [app.name, app.bundleID, app.path].contains { $0?.localizedCaseInsensitiveContains(query) ?? false }
-        }
+        AppFilter(query: query, onlyWithAssociations: onlyWithAssociations).apply(to: store.scan?.apps ?? [])
     }
 
     private var appsTable: some View {
@@ -111,20 +108,7 @@ struct LaunchServicesView: View {
 
     private var filterBar: some View {
         HStack(spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField(mode == .apps ? "Name, bundle ID, or path" : "Scheme, type, or app", text: $query)
-                    .textFieldStyle(.plain)
-                if !query.isEmpty {
-                    Button("Clear Search", systemImage: "xmark.circle.fill") { query = "" }
-                        .labelStyle(.iconOnly)
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .glassEffect(in: .capsule)
+            SearchField(prompt: mode == .apps ? "Name, bundle ID, or path" : "Scheme, type, or app", text: $query)
 
             Picker("View", selection: $mode) {
                 ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
@@ -132,6 +116,13 @@ struct LaunchServicesView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .fixedSize()
+
+            if mode == .apps {
+                Toggle("With Associations", isOn: $onlyWithAssociations)
+                    .toggleStyle(.button)
+                    .fixedSize()
+                    .help("Show only apps that declare at least one URL scheme or file type.")
+            }
 
             Button("Refresh", systemImage: "arrow.clockwise") { Task { await store.refresh() } }
                 .labelStyle(.iconOnly)
@@ -167,6 +158,20 @@ struct LaunchServicesView: View {
         return "Not the full Launch Services database. Schemes and types are those declared by apps in: \(roots). "
             + "Defaults and handlers come from Launch Services, so they include apps outside those folders, but a "
             + "scheme or type claimed only by such apps isn't listed."
+    }
+}
+
+struct AppFilter {
+    var query = ""
+    /// Hide apps that declare no URL scheme or file type; most helper and system apps declare none.
+    var onlyWithAssociations = false
+
+    func apply(to apps: [AppRecord]) -> [AppRecord] {
+        apps.filter { app in
+            (!onlyWithAssociations || !app.urlSchemes.isEmpty || !app.contentTypes.isEmpty)
+                && (query.isEmpty
+                    || [app.name, app.bundleID, app.path].contains { $0?.localizedCaseInsensitiveContains(query) ?? false })
+        }
     }
 }
 
