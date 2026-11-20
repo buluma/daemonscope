@@ -153,6 +153,37 @@ struct SuspectJobVerificationTests {
         #expect(try #require(try collect(fake).jobs.first).rowSuspect)
     }
 
+    @Test func hiddenCandidateWhoseCheckFailsStaysVisibleAsSuspect() throws {
+        let forgedGui = "gui/501 = {\n\tservice count = 2\n\tservices = {\n"
+            + "\t\t       0      - \tdev.attacker.x\n\t\t   12345      - \tcom.fake.row\n\t}\n\tfoo = {\n"
+            + "\t\t     777      - \tcom.example.hidden\n\t}\n}\n"
+        let fake = FakeLaunchctl([
+            ["print", "system"]: .success(listing("system", [])),
+            ["print", "user/501"]: .success(emptyUser),
+            ["print", "gui/501"]: .success(forgedGui),
+            ["dumpstate"]: .success("gui/501/com.example.hidden = {\n\tstate = running\n}\n"),
+            // The direct check times out instead of answering.
+            ["print", "gui/501/com.example.hidden"]: .failure(LaunchctlCollector.CollectError.timedOut),
+        ])
+        let job = try #require(try collect(fake).jobs.first { $0.label == "com.example.hidden" })
+        #expect(job.rowSuspect)
+        #expect(!job.isRunning)
+    }
+
+    @Test func listedTwiceGetsNoPidEvenAfterConfirmation() throws {
+        var listing = DomainListing(services: ["com.example.a": .init(pid: 4242, status: "-")], disabled: [:])
+        listing.suspectLabels = ["com.example.a"]
+        let snapshot = LoadedSnapshot.build(listings: ["system": listing], details: nil)
+        let outcome = SuspectJobVerifier.verify(
+            snapshot: snapshot, listings: ["system": listing], details: nil,
+            launchctl: { _ in "system/com.example.a = {\n\tstate = running\n}\n" })
+        let job = try #require(outcome.jobs.first)
+        #expect(job.verifiedIndividually)
+        #expect(job.pid == nil)
+        // Running comes from launchd's direct answer instead.
+        #expect(job.isRunning)
+    }
+
     @Test func healthyJobsAreNotQueriedOneByOne() throws {
         let fake = FakeLaunchctl([
             ["print", "system"]: .success(listing("system", [(612, "com.example.a")])),
