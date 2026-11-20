@@ -8,10 +8,12 @@ struct MainWindowView: View {
     }
 
     let store: InventoryStore
+    let launchServices: LaunchServicesStore
 
     @State private var section: Section? = .launchd
     @State private var filter = JobFilter()
     @State private var selection: InventoryEntry.ID?
+    @State private var launchServicesSelection: LaunchServicesSelection?
 
     var body: some View {
         // Three real columns rather than a table and detail sharing one HSplitView, so the table and the detail
@@ -27,13 +29,13 @@ struct MainWindowView: View {
                 JobTableView(store: store, filter: $filter, selection: $selection)
                     .navigationSplitViewColumnWidth(min: 560, ideal: 720)
             case .launchServices:
-                ContentUnavailableView(
-                    "Not Built Yet", systemImage: "hammer",
-                    description: Text("Launch Services inventory comes in a later slice."))
+                LaunchServicesView(store: launchServices, selection: $launchServicesSelection)
                     .navigationSplitViewColumnWidth(min: 560, ideal: 720)
             }
         } detail: {
-            if section != .launchServices, let entry = store.entries.first(where: { $0.id == selection }) {
+            if section == .launchServices {
+                LaunchServicesDetailView(store: launchServices, selection: launchServicesSelection)
+            } else if let entry = store.entries.first(where: { $0.id == selection }) {
                 JobDetailView(entry: entry, scanDate: store.scan?.date, loadedDate: store.loadedDate)
             } else {
                 ContentUnavailableView("No Job Selected", systemImage: "sidebar.right")

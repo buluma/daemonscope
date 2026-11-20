@@ -6,6 +6,7 @@ struct DaemonscopeApp: App {
     static let mainWindowID = "main"
 
     @State private var store = InventoryStore()
+    @State private var launchServices = LaunchServicesStore()
 
     var body: some Scene {
         // LSUIElement apps are never active on their own, so the menu bar extra is the app's only
@@ -16,7 +17,7 @@ struct DaemonscopeApp: App {
         .menuBarExtraStyle(.window)
 
         Window("Daemonscope", id: Self.mainWindowID) {
-            MainWindowView(store: store)
+            MainWindowView(store: store, launchServices: launchServices)
         }
         // Without this the window would open at launch, which a menu-bar-only app shouldn't do.
         .defaultLaunchBehavior(.suppressed)
