@@ -37,7 +37,10 @@ struct InventoryEntry: Identifiable, Sendable, Hashable {
     /// Per-launch app jobs runningboardd creates for every running app (`application.<bundle id>.<ids>`). They
     /// track open apps, not daemons or agents anyone installed.
     var isAppInstance: Bool {
-        loaded?.submittedBy?.hasPrefix("(submitted by runningboardd") ?? false
+        // Both parts: the label comes from the domain listing and the submitter from launchd's own `path` line,
+        // so a job can't hide itself here by choosing either one.
+        guard let loaded, loaded.label.hasPrefix("application.") else { return false }
+        return loaded.submittedBy?.hasPrefix("(submitted by runningboardd") ?? false
     }
 
     var isApple: Bool {

@@ -144,6 +144,53 @@ struct DomainListingTests {
     }
 }
 
+struct DomainListingTamperTests {
+    @Test func duplicateLabelRowsAreFlaggedNotOverwritten() throws {
+        let text = "system = {\n\tservices = {\n\t\t     612      - \tcom.example.a\n\t\t       0      0 \tcom.example.a\n\t}\n}\n"
+        let listing = try #require(DomainListing.parse(text, domain: "system"))
+        #expect(listing.services["com.example.a"]?.pid == 612)
+        #expect(listing.suspectLabels == ["com.example.a"])
+    }
+
+    @Test func labelsWithControlCharactersAreDropped() throws {
+        let text = "system = {\n\tservices = {\n\t\t       0      0 \tcom.example.\u{1B}bad\n\t\t       0      0 \tcom.example.ok\n\t}\n}\n"
+        let listing = try #require(DomainListing.parse(text, domain: "system"))
+        #expect(Array(listing.services.keys) == ["com.example.ok"])
+    }
+
+    @Test func suspectListingLabelsMarkJobsTampered() throws {
+        var listing = DomainListing(services: ["com.example.a": .init(pid: 5, status: "-")], disabled: [:])
+        listing.suspectLabels = ["com.example.a"]
+        let job = try #require(LoadedSnapshot.build(
+            listings: ["system": listing],
+            details: [ServiceKey(domain: "system", label: "com.example.a"): [["path": "/Library/LaunchDaemons/a.plist"]]]
+        ).jobs.first)
+        #expect(job.detailsTampered)
+        #expect(job.path == nil)
+    }
+}
+
+struct DumpFieldOrderTests {
+    @Test func fieldsAfterTheFirstNestedBlockAreIgnored() throws {
+        // A job's arguments and environment are printed in nested blocks, unescaped. Anything that looks like a
+        // top-level field after them may have been written by the job itself.
+        let dump = """
+        gui/501/dev.attacker.agent = {
+        	path = /Users/tester/Library/LaunchAgents/dev.attacker.agent.plist
+        	type = LaunchAgent
+        	arguments = {
+        		/usr/bin/true
+        	}
+        	parent bundle identifier = com.apple.Finder
+        	last exit code = 0
+        	program = /System/Library/CoreServices/Finder.app/Contents/MacOS/Finder
+        }
+        """
+        let fields = try #require(LaunchctlDump.serviceBlocks(dump, domains: ["gui/501"])[ServiceKey(domain: "gui/501", label: "dev.attacker.agent")]?.first)
+        #expect(fields == ["path": "/Users/tester/Library/LaunchAgents/dev.attacker.agent.plist", "type": "LaunchAgent"])
+    }
+}
+
 struct LaunchctlDumpTests {
     private func snapshot(dump: String? = dumpWithInjection) -> LoadedSnapshot {
         LoadedSnapshot.build(
@@ -188,7 +235,8 @@ struct LaunchctlDumpTests {
         #expect(job.path == "/Library/LaunchDaemons/com.cloudflare.cloudflared.plist")
         #expect(job.type == "LaunchDaemon")
         #expect(job.program == "/opt/homebrew/bin/cloudflared")
-        #expect(job.lastExit == "(never exited)")
+        // `last exit code` is printed after nested blocks, where a job can forge lines, so it isn't read.
+        #expect(job.lastExit == nil)
         #expect(!String(describing: job).contains("do-not-parse-me"))
     }
 

@@ -163,6 +163,27 @@ struct JobInventoryTests {
         #expect(entries.filter(\.isApple).compactMap(\.label).sorted() == ["com.apple.extra", "org.example.sys"])
     }
 
+    @Test func nonCanonicalPathsAreNotApple() {
+        let entries = JobInventory.merge(
+            disk: [],
+            loaded: LoadedSnapshot(jobs: [
+                loaded("com.example.sneaky", path: "/System/Library/../../Library/LaunchDaemons/sneaky.plist"),
+                loaded("com.example.dot", path: "/System/Library/./LaunchDaemons/../../../tmp/x.plist"),
+                loaded("com.example.slashes", path: "/System/Library//LaunchDaemons/x.plist"),
+            ], disabled: [:]),
+            uid: 501)
+        #expect(entries.filter(\.isApple).isEmpty)
+    }
+
+    @Test func appInstanceNeedsBothRunningboardSubmitterAndApplicationLabel() {
+        let impostor = LoadedJob(
+            domain: "gui/501", label: "dev.attacker.agent", path: nil,
+            submittedBy: "(submitted by runningboardd.408)", type: nil, state: nil, pid: 9, program: nil,
+            lastExit: nil, parentBundleID: nil)
+        let entries = JobInventory.merge(disk: [], loaded: LoadedSnapshot(jobs: [impostor], disabled: [:]), uid: 501)
+        #expect(entries.first?.isAppInstance == false)
+    }
+
     @Test func diskJobsOutsideQueriedDomainsAreUnknown() {
         let entries = JobInventory.merge(
             disk: [

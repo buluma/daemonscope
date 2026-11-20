@@ -78,8 +78,14 @@ struct DiskJob: Identifiable, Sendable, Hashable, CustomStringConvertible {
         Self.isSIPProtected(path)
     }
 
+    /// Only canonical absolute paths count: `/System/Library/../../tmp/x` starts with the right prefix but
+    /// points elsewhere.
     static func isSIPProtected(_ path: String) -> Bool {
-        path.hasPrefix("/System/Library/") || path.hasPrefix("/Library/Apple/")
+        let components = path.split(separator: "/", omittingEmptySubsequences: false).dropFirst()
+        guard path.hasPrefix("/"), !components.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else {
+            return false
+        }
+        return path.hasPrefix("/System/Library/") || path.hasPrefix("/Library/Apple/")
     }
 
     var description: String {
