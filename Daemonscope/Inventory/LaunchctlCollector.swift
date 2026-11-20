@@ -42,6 +42,10 @@ struct LaunchctlCollector: Sendable {
                     guard let listing = DomainListing.parse(try launchctl(["print", domain]), domain: domain) else {
                         throw CollectError.unrecognizedOutput
                     }
+                    guard listing.isStructurallySound else {
+                        issues.append("\(domain)'s listing contained forged entries and was ignored.")
+                        continue
+                    }
                     listings[domain] = listing
                 } catch {
                     firstError = firstError ?? error
@@ -57,12 +61,17 @@ struct LaunchctlCollector: Sendable {
             } catch {
                 issues.append("Job details unavailable: \(error.localizedDescription)")
             }
-            let snapshot = LoadedSnapshot.build(listings: listings, details: details, issues: issues)
+            let snapshot = LoadedSnapshot.build(listings: listings, details: details)
             let tampered = snapshot.jobs.filter(\.detailsTampered).count
-            guard tampered > 0 else { return snapshot }
+            if tampered > 0 {
+                issues.append("launchd's dump held conflicting entries for \(tampered) jobs; their details were ignored.")
+            }
+            let suspect = snapshot.jobs.filter(\.rowSuspect).count
+            if suspect > 0 {
+                issues.append("\(suspect) listed jobs couldn't be confirmed and may be forged; their state is unknown.")
+            }
             return LoadedSnapshot(
-                jobs: snapshot.jobs, disabled: snapshot.disabled, queriedDomains: snapshot.queriedDomains,
-                issues: issues + ["launchd's dump held conflicting entries for \(tampered) jobs; their details were ignored."])
+                jobs: snapshot.jobs, disabled: snapshot.disabled, queriedDomains: snapshot.queriedDomains, issues: issues)
         }
     }
 

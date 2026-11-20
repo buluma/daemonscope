@@ -78,13 +78,13 @@ enum JobInventory {
             entries.append(InventoryEntry(
                 disk: match, loaded: job,
                 disabledOverride: loaded.disabled[job.domain]?[job.label],
-                state: job.isRunning ? .running : .loadedNotRunning))
+                state: job.rowSuspect ? .unknown : job.isRunning ? .running : .loadedNotRunning))
         }
 
         for job in disk where !matchedPaths.contains(job.path) {
             let expected = expectedDomains(for: job.location, uid: uid)
-            // If none of the domains this job would load in answered, "not loaded" can't be claimed.
-            if let queried = loaded.queriedDomains, queried.isDisjoint(with: expected) {
+            // "Not loaded" holds only if every domain this job could load in answered.
+            if let queried = loaded.queriedDomains, !queried.isSuperset(of: expected) {
                 entries.append(InventoryEntry(disk: job, loaded: nil, disabledOverride: nil, state: .unknown))
                 continue
             }

@@ -22,6 +22,9 @@ struct LoadedJob: Sendable, Hashable {
     /// The dump held more than one block for this job, so someone wrote fake ones. The details from the dump
     /// were dropped; what's left comes from the domain listing.
     var detailsTampered = false
+    /// The domain listing's row for this job looks forged: its label is listed twice, or it has no block in the
+    /// dump (a newline in some job's label can print a fake row). Its PID isn't trusted.
+    var rowSuspect = false
 
     /// From the domain listing's PID column, not the dump, so another job can't fake it.
     var isRunning: Bool { pid != nil }
@@ -45,6 +48,9 @@ struct DomainListing: Sendable, Equatable {
     /// Labels listed more than once. launchd lists each label once per domain, so a repeat means someone forged
     /// a row; the first row is kept and the job is flagged.
     var suspectLabels: Set<String> = []
+    /// `false` when a section appears twice or a row in it doesn't parse. launchd prints each section once, so
+    /// either means a label with newlines rewrote the listing's structure, and none of it can be trusted.
+    var isStructurallySound = true
 
     /// `nil` unless `text` is `launchctl print` output for `domain`.
     static func parse(_ text: String, domain: String) -> DomainListing? {
@@ -54,20 +60,29 @@ struct DomainListing: Sendable, Equatable {
         var services: [String: Service] = [:]
         var disabled: [String: Bool] = [:]
         var suspect: Set<String> = []
+        var isSound = true
+        var seenServices = false
+        var seenDisabled = false
         enum Section { case none, services, disabled }
         var section = Section.none
 
         for line in lines.dropFirst() {
             switch section {
             case .none:
-                if line == "\tservices = {" { section = .services }
-                else if line == "\tdisabled services = {" { section = .disabled }
+                if line == "\tservices = {" {
+                    if seenServices { isSound = false }
+                    seenServices = true
+                    section = .services
+                } else if line == "\tdisabled services = {" {
+                    if seenDisabled { isSound = false }
+                    seenDisabled = true
+                    section = .disabled
+                }
             case .services, .disabled:
                 if line == "\t}" {
                     section = .none
                     continue
                 }
-                guard line.hasPrefix("\t\t"), !line.hasPrefix("\t\t\t") else { continue }
                 if section == .services, let (label, service) = parseServiceRow(line) {
                     if services[label] == nil {
                         services[label] = service
@@ -76,14 +91,18 @@ struct DomainListing: Sendable, Equatable {
                     }
                 } else if section == .disabled, let (label, isDisabled) = parseDisabledEntry(line) {
                     disabled[label] = isDisabled
+                } else {
+                    isSound = false
                 }
             }
         }
-        return DomainListing(services: services, disabled: disabled, suspectLabels: suspect)
+        return DomainListing(
+            services: services, disabled: disabled, suspectLabels: suspect, isStructurallySound: isSound)
     }
 
     /// `\t\t     612      - \tcom.example.job`: PID, status, then a tab before the label.
     private static func parseServiceRow(_ line: String) -> (String, Service)? {
+        guard line.hasPrefix("\t\t"), !line.hasPrefix("\t\t\t") else { return nil }
         let columns = line.split(separator: "\t", omittingEmptySubsequences: true)
         guard columns.count == 2 else { return nil }
         let numbers = columns[0].split(separator: " ", omittingEmptySubsequences: true)
@@ -97,6 +116,7 @@ struct DomainListing: Sendable, Equatable {
 
     /// `\t\t"com.example.job" => disabled`
     private static func parseDisabledEntry(_ line: String) -> (String, Bool)? {
+        guard line.hasPrefix("\t\t"), !line.hasPrefix("\t\t\t") else { return nil }
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         guard trimmed.hasPrefix("\""), let close = trimmed.dropFirst().firstIndex(of: "\"") else { return nil }
         let label = String(trimmed[trimmed.index(after: trimmed.startIndex)..<close])
@@ -135,6 +155,9 @@ struct LoadedSnapshot: Sendable {
             for (label, service) in listing.services.sorted(by: { $0.key < $1.key }) {
                 let blocks = details?[ServiceKey(domain: domain, label: label)] ?? []
                 let tampered = blocks.count > 1 || listing.suspectLabels.contains(label)
+                // Every real listing row has exactly one dump block (checked on macOS 27.3). A row injected by a
+                // newline in a label has none. Without a dump there's nothing to check against.
+                let rowSuspect = listing.suspectLabels.contains(label) || (details != nil && blocks.isEmpty)
                 let fields = !tampered && blocks.count == 1 ? blocks[0] : [:]
                 let rawPath = fields["path"]
                 let isFile = rawPath?.hasPrefix("/") ?? false
@@ -145,12 +168,13 @@ struct LoadedSnapshot: Sendable {
                     submittedBy: isFile ? nil : rawPath,
                     type: fields["type"],
                     state: fields["state"],
-                    pid: service.pid,
+                    pid: rowSuspect ? nil : service.pid,
                     program: fields["program"],
                     // From the listing: the dump prints `last exit code` after nested blocks, where a job can forge it.
                     lastExit: service.status == "-" ? nil : service.status,
                     parentBundleID: fields["parent bundle identifier"],
-                    detailsTampered: tampered))
+                    detailsTampered: tampered,
+                    rowSuspect: rowSuspect))
             }
         }
         return LoadedSnapshot(

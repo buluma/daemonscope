@@ -184,6 +184,13 @@ struct JobInventoryTests {
         #expect(entries.first?.isAppInstance == false)
     }
 
+    @Test func suspectListingRowsAreUnknown() {
+        var job = loaded("com.fake.row", domain: "gui/501", path: nil, state: "running", pid: nil)
+        job.rowSuspect = true
+        let entries = JobInventory.merge(disk: [], loaded: LoadedSnapshot(jobs: [job], disabled: [:]), uid: 501)
+        #expect(entries.first?.state == .unknown)
+    }
+
     @Test func diskJobsOutsideQueriedDomainsAreUnknown() {
         let entries = JobInventory.merge(
             disk: [
@@ -194,7 +201,16 @@ struct JobInventoryTests {
             loaded: LoadedSnapshot(jobs: [], disabled: ["gui/501": [:]], queriedDomains: ["gui/501"]),
             uid: 501)
         #expect(entries.first { $0.disk?.label == "com.example.daemon" }?.state == .unknown)
-        #expect(entries.first { $0.disk?.label == "com.example.agent" }?.state == .foundOnDisk)
+        // An agent could also load in user/501, which didn't answer, so "not loaded" can't be claimed either.
+        #expect(entries.first { $0.disk?.label == "com.example.agent" }?.state == .unknown)
+    }
+
+    @Test func agentsAreKnownOnlyWhenEveryAgentDomainAnswered() {
+        let entries = JobInventory.merge(
+            disk: [disk("com.example.agent", path: "/Library/LaunchAgents/a.plist", location: .globalAgents)],
+            loaded: LoadedSnapshot(jobs: [], disabled: [:], queriedDomains: ["gui/501", "user/501"]),
+            uid: 501)
+        #expect(entries.first?.state == .foundOnDisk)
     }
 
     @Test func idsAreUnique() {
