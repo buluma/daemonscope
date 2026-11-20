@@ -63,7 +63,9 @@ This is not the full Launch Services database. Schemes and types are those decla
 - **Loaded state** comes from `launchctl print <domain>`, with details added from one `launchctl dumpstate`. Neither is a stable API, and both can change between macOS versions.
 - **Tamper detection:** launchd prints job labels, arguments and environment values without escaping. A job can therefore try to forge entries in that output. Daemonscope checks the output's structure against counts launchd prints before any job-supplied text. When something looks forged, it asks launchd about the affected jobs one at a time and shows a warning. Treat its results as best-effort with tamper detection, not as proof.
 - **Sandbox:** Daemonscope doesn't use the App Sandbox. The sandbox would block reading job folders and running `launchctl`, and App Store distribution is out of scope.
+- **False alarms at startup:** a domain that launchd is still setting up, for example right after login, can briefly print a job count that doesn't match its rows. Daemonscope then flags the domain and checks its jobs one by one; the warning clears on the next refresh.
 - **Testing status:**
   - Tested on macOS 27 with an administrator account.
-  - What a standard account can see of the `system` domain hasn't been checked in a real standard-account session.
+  - **Unprivileged access**, approximated by running the data collection as the `nobody` user: the `system` domain was fully readable without admin rights. That covers every job, PID, the disabled list, the dump, and per-job prints. The user's own domain was readable too.
+  - **Not tested in a real standard-account session.** `nobody` has no login session, so the `gui` domain and the menu bar UI weren't exercised.
   - macOS 26 hasn't been tested.
