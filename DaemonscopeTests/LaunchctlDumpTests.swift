@@ -283,6 +283,53 @@ struct ListingInjectionTests {
     }
 }
 
+struct CountPreservingHideTests {
+    /// The bypass: k fake rows keep the count right while closing services and opening a dummy block swallows
+    /// the k real rows after them.
+    /// Two real services (the attacker and com.example.hidden); the fake row stands in for the hidden one.
+    private let countPreservingHide = "gui/501 = {\n\tservice count = 2\n\tservices = {\n"
+        + "\t\t       0      - \tdev.attacker.x\n"
+        + "\t\t   12345      - \tcom.fake.row\n"
+        + "\t}\n\tfoo = {\n"
+        + "\t\t     777      - \tcom.example.hidden\n"
+        + "\t}\n}\n"
+
+    @Test func rowShapedLinesOutsideServicesBreakTheListing() throws {
+        #expect(try #require(DomainListing.parse(countPreservingHide, domain: "gui/501")).isStructurallySound == false)
+    }
+
+    @Test func disabledEntriesOutsideTheirSectionBreakTheListing() throws {
+        let text = "gui/501 = {\n\tservice count = 0\n\tservices = {\n\t}\n\tfoo = {\n\t\t\"com.example.a\" => disabled\n\t}\n}\n"
+        #expect(try #require(DomainListing.parse(text, domain: "gui/501")).isStructurallySound == false)
+    }
+
+    @Test func repeatedTopLevelBlockNamesBreakTheListing() throws {
+        let text = "gui/501 = {\n\tservice count = 0\n\tendpoints = {\n\t}\n\tservices = {\n\t}\n\tendpoints = {\n\t}\n}\n"
+        #expect(try #require(DomainListing.parse(text, domain: "gui/501")).isStructurallySound == false)
+    }
+
+    @Test func singleTabLinesInsideNestedBlocksBreakTheListing() throws {
+        // A real nested block only holds deeper-indented lines; a one-tab line there means a label reopened
+        // the top level.
+        let text = "gui/501 = {\n\tservice count = 0\n\tservices = {\n\t}\n\tfoo = {\n\tdisabled services = {\n\t\t}\n\t}\n}\n"
+        #expect(try #require(DomainListing.parse(text, domain: "gui/501")).isStructurallySound == false)
+    }
+
+    @Test func soundListingRowWithoutADumpBlockIsSuspect() throws {
+        let text = "system = {\n\tservice count = 2\n\tservices = {\n\t\t     612      - \tcom.example.a\n"
+            + "\t\t       0      - \tcom.example.b\n\t}\n}\n"
+        let listing = try #require(DomainListing.parse(text, domain: "system"))
+        #expect(listing.isStructurallySound)
+        let dump = "system/com.example.a = {\n\tpath = /Library/LaunchDaemons/a.plist\n}\n"
+        let snapshot = LoadedSnapshot.build(
+            listings: ["system": listing], details: LaunchctlDump.serviceBlocks(dump, domains: ["system"]))
+        #expect(snapshot.jobs.first { $0.label == "com.example.a" }?.rowSuspect == false)
+        #expect(snapshot.jobs.first { $0.label == "com.example.b" }?.rowSuspect == true)
+        // A single suspect row doesn't take the domain's other evidence with it.
+        #expect(snapshot.queriedDomains == ["system"])
+    }
+}
+
 struct DumpFieldOrderTests {
     @Test func fieldsAfterTheFirstNestedBlockAreIgnored() throws {
         // A job's arguments and environment are printed in nested blocks, unescaped. Anything that looks like a

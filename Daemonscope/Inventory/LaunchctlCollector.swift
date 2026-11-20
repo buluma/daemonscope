@@ -65,9 +65,10 @@ struct LaunchctlCollector: Sendable {
             if tampered > 0 {
                 issues.append("launchd's dump held conflicting entries for \(tampered) jobs; their details were ignored.")
             }
-            let duplicated = Set(listings.values.filter(\.isStructurallySound).flatMap(\.suspectLabels)).count
-            if duplicated > 0 {
-                issues.append("\(duplicated) jobs were listed twice and may be forged; their state is unknown.")
+            let soundDomains = Set(listings.filter { $0.value.isStructurallySound }.keys)
+            let suspect = snapshot.jobs.filter { $0.rowSuspect && soundDomains.contains($0.domain) }.count
+            if suspect > 0 {
+                issues.append("\(suspect) listed jobs couldn't be confirmed and may be forged; their state is unknown.")
             }
             return LoadedSnapshot(
                 jobs: snapshot.jobs, disabled: snapshot.disabled, queriedDomains: snapshot.queriedDomains, issues: issues)
