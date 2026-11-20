@@ -42,9 +42,8 @@ struct LaunchctlCollector: Sendable {
                     guard let listing = DomainListing.parse(try launchctl(["print", domain]), domain: domain) else {
                         throw CollectError.unrecognizedOutput
                     }
-                    guard listing.isStructurallySound else {
-                        issues.append("\(domain)'s listing contained forged entries and was ignored.")
-                        continue
+                    if !listing.isStructurallySound {
+                        issues.append("\(domain)'s listing looks forged: its jobs are shown with unknown state.")
                     }
                     listings[domain] = listing
                 } catch {
@@ -66,9 +65,9 @@ struct LaunchctlCollector: Sendable {
             if tampered > 0 {
                 issues.append("launchd's dump held conflicting entries for \(tampered) jobs; their details were ignored.")
             }
-            let suspect = snapshot.jobs.filter(\.rowSuspect).count
-            if suspect > 0 {
-                issues.append("\(suspect) listed jobs couldn't be confirmed and may be forged; their state is unknown.")
+            let duplicated = Set(listings.values.filter(\.isStructurallySound).flatMap(\.suspectLabels)).count
+            if duplicated > 0 {
+                issues.append("\(duplicated) jobs were listed twice and may be forged; their state is unknown.")
             }
             return LoadedSnapshot(
                 jobs: snapshot.jobs, disabled: snapshot.disabled, queriedDomains: snapshot.queriedDomains, issues: issues)

@@ -101,8 +101,8 @@ struct InventoryStoreTests {
 }
 
 struct LaunchctlCollectorTests {
-    private static let systemListing = "system = {\n\tservices = {\n\t\t     612      - \tcom.example.a\n\t}\n}\n"
-    private static let guiListing = "gui/501 = {\n\tservices = {\n\t}\n}\n"
+    private static let systemListing = "system = {\n\tservice count = 1\n\tservices = {\n\t\t     612      - \tcom.example.a\n\t}\n}\n"
+    private static let guiListing = "gui/501 = {\n\tservice count = 0\n\tservices = {\n\t}\n}\n"
 
     @Test func collectsListingsAndDetails() throws {
         let collector = LaunchctlCollector(uid: 501) { arguments in
@@ -122,12 +122,12 @@ struct LaunchctlCollectorTests {
         #expect(snapshot.issues.first?.contains("user/501") == true)
     }
 
-    @Test func structurallyBrokenListingCountsAsFailedDomain() throws {
+    @Test func structurallyBrokenListingKeepsJobsButNotTheDomain() throws {
         let collector = LaunchctlCollector(uid: 501) { arguments in
             switch arguments {
             case ["print", "system"]: return Self.systemListing
             case ["print", "gui/501"]:
-                return "gui/501 = {\n\tservices = {\n\t}\n\tservices = {\n\t}\n}\n"
+                return "gui/501 = {\n\tservice count = 0\n\tservices = {\n\t\t       0      - \tcom.example.extra\n\t}\n}\n"
             case ["print", "user/501"]: return Self.guiListing.replacingOccurrences(of: "gui/501", with: "user/501")
             default: return "system/com.example.a = {\n\tpath = /Library/LaunchDaemons/a.plist\n}\n"
             }
@@ -135,6 +135,7 @@ struct LaunchctlCollectorTests {
         let snapshot = try collector.collect()
         #expect(snapshot.queriedDomains == ["system", "user/501"])
         #expect(snapshot.issues.contains { $0.contains("gui/501") })
+        #expect(snapshot.jobs.first { $0.label == "com.example.extra" }?.rowSuspect == true)
     }
 
     @Test func dumpstateFailureKeepsListingsAndReportsIt() throws {
