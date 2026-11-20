@@ -1,10 +1,12 @@
 import Foundation
 
-/// Asks launchd which jobs are loaded, through one `launchctl dumpstate` call.
+/// Asks launchd which jobs are loaded.
 ///
-/// `dumpstate` was picked over `launchctl print` per job: both print the same undocumented block format, but
-/// one dumpstate takes ~0.2 s where ~1,000 per-job prints take ~10 s. Its output also holds every job's
-/// environment, so it's parsed in memory and never written anywhere.
+/// `launchctl print <domain>` for system, user and gui is the source of truth for which jobs are loaded, their
+/// PIDs and disabled overrides. One `launchctl dumpstate` adds per-job details (plist path, type, last exit,
+/// registering app). The dump is used instead of ~1,000 per-job prints (~0.4 s vs ~10 s), but it can hold
+/// forged blocks, so see `LaunchctlDump` for how they're contained. It also holds every job's environment, so
+/// it's parsed in memory and never written anywhere.
 struct LaunchctlCollector: Sendable {
     enum CollectError: Error, Equatable, LocalizedError {
         case launchFailed(String)
@@ -29,19 +31,43 @@ struct LaunchctlCollector: Sendable {
         body = collect
     }
 
-    /// Parses whatever `output` returns as dumpstate text for `uid`'s domains.
-    init(uid: uid_t, output: @escaping @Sendable () throws -> String) {
+    /// Collects `uid`'s domains, running launchctl with the given arguments through `launchctl`.
+    init(uid: uid_t, launchctl: @escaping @Sendable ([String]) throws -> String) {
         body = {
-            let snapshot = LaunchctlDump.parse(try output(), uid: uid)
-            // No domain header at all means the format changed or the command misbehaved; don't report that as
-            // "nothing is loaded".
-            guard !snapshot.disabled.isEmpty || !snapshot.jobs.isEmpty else { throw CollectError.unrecognizedOutput }
-            return snapshot
+            var listings: [String: DomainListing] = [:]
+            var issues: [String] = []
+            var firstError: Error?
+            for domain in ["system", "user/\(uid)", "gui/\(uid)"] {
+                do {
+                    guard let listing = DomainListing.parse(try launchctl(["print", domain]), domain: domain) else {
+                        throw CollectError.unrecognizedOutput
+                    }
+                    listings[domain] = listing
+                } catch {
+                    firstError = firstError ?? error
+                    issues.append("Couldn't list \(domain): \(error.localizedDescription)")
+                }
+            }
+            // Nothing listed means launchd couldn't be asked at all; don't report that as "nothing is loaded".
+            guard !listings.isEmpty else { throw firstError ?? CollectError.unrecognizedOutput }
+
+            var details: [ServiceKey: [[String: String]]]?
+            do {
+                details = LaunchctlDump.serviceBlocks(try launchctl(["dumpstate"]), domains: Set(listings.keys))
+            } catch {
+                issues.append("Job details unavailable: \(error.localizedDescription)")
+            }
+            let snapshot = LoadedSnapshot.build(listings: listings, details: details, issues: issues)
+            let tampered = snapshot.jobs.filter(\.detailsTampered).count
+            guard tampered > 0 else { return snapshot }
+            return LoadedSnapshot(
+                jobs: snapshot.jobs, disabled: snapshot.disabled, queriedDomains: snapshot.queriedDomains,
+                issues: issues + ["launchd's dump held conflicting entries for \(tampered) jobs; their details were ignored."])
         }
     }
 
-    static let live = LaunchctlCollector(uid: getuid()) {
-        try run(executable: "/bin/launchctl", arguments: ["dumpstate"], timeout: .seconds(30))
+    static let live = LaunchctlCollector(uid: getuid()) { arguments in
+        try run(executable: "/bin/launchctl", arguments: arguments, timeout: .seconds(30))
     }
 
     func collect() throws -> LoadedSnapshot {
