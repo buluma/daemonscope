@@ -42,9 +42,6 @@ struct LaunchctlCollector: Sendable {
                     guard let listing = DomainListing.parse(try launchctl(["print", domain]), domain: domain) else {
                         throw CollectError.unrecognizedOutput
                     }
-                    if !listing.isStructurallySound {
-                        issues.append("\(domain)'s listing looks forged: its jobs are shown with unknown state.")
-                    }
                     listings[domain] = listing
                 } catch {
                     firstError = firstError ?? error
@@ -61,17 +58,24 @@ struct LaunchctlCollector: Sendable {
                 issues.append("Job details unavailable: \(error.localizedDescription)")
             }
             let snapshot = LoadedSnapshot.build(listings: listings, details: details)
-            let tampered = snapshot.jobs.filter(\.detailsTampered).count
+            let outcome = SuspectJobVerifier.verify(
+                snapshot: snapshot, listings: listings, details: details, launchctl: launchctl)
+            for domain in outcome.rebuiltDomains {
+                issues.append("\(domain)'s listing looks forged, so its jobs were checked one by one and its disabled list was ignored.")
+            }
+            if outcome.confirmed > 0 {
+                issues.append("\(outcome.confirmed) jobs had conflicting launchd output and were confirmed directly; another job may be forging entries.")
+            }
+            let tampered = outcome.jobs.filter(\.detailsTampered).count
             if tampered > 0 {
                 issues.append("launchd's dump held conflicting entries for \(tampered) jobs; their details were ignored.")
             }
-            let soundDomains = Set(listings.filter { $0.value.isStructurallySound }.keys)
-            let suspect = snapshot.jobs.filter { $0.rowSuspect && soundDomains.contains($0.domain) }.count
+            let suspect = outcome.jobs.filter(\.rowSuspect).count
             if suspect > 0 {
                 issues.append("\(suspect) listed jobs couldn't be confirmed and may be forged; their state is unknown.")
             }
             return LoadedSnapshot(
-                jobs: snapshot.jobs, disabled: snapshot.disabled, queriedDomains: snapshot.queriedDomains, issues: issues)
+                jobs: outcome.jobs, disabled: snapshot.disabled, queriedDomains: snapshot.queriedDomains, issues: issues)
         }
     }
 
@@ -93,6 +97,11 @@ struct LaunchctlCollector: Sendable {
         process.standardOutput = stdout
         process.standardError = stderr
         process.standardInput = FileHandle.nullDevice
+        // Waiting through a termination handler, not `waitUntilExit()`: that polls the run loop and costs ~70 ms
+        // per call, which adds up when a forged domain is checked job by job. Set before launch so a fast exit
+        // can't be missed.
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
 
         do {
             try process.run()
@@ -119,7 +128,7 @@ struct LaunchctlCollector: Sendable {
 
         // Drain stdout before waiting: dumpstate prints megabytes, far more than a pipe buffer holds.
         let output = stdout.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
+        exited.wait()
         timer.cancel()
         errorReader.wait()
 
@@ -134,7 +143,7 @@ struct LaunchctlCollector: Sendable {
     }
 
     /// A mutable box shared with the reader and timer callbacks. Each field has a single writer, and every read
-    /// happens after that writer finished (`errorReader.wait()`, `waitUntilExit()`).
+    /// happens after that writer finished (`errorReader.wait()`, the termination semaphore).
     private final class SharedBox: @unchecked Sendable {
         var data = Data()
         var flag = false
