@@ -9,6 +9,7 @@ private let systemPrint = """
 system = {
 	type = system
 	handle = 0
+	service count = 3
 	security context = {
 		uid = 0
 	}
@@ -35,6 +36,7 @@ system = {
 private let guiPrint = """
 gui/501 = {
 	type = login
+	service count = 3
 	services = {
 		       0      0 	io.tailscale.ipn.macsys.login-item-helper
 		     777   (pe) 	com.example.agent
@@ -174,6 +176,7 @@ struct DomainListingTamperTests {
 /// unescaped, so the rest of the label became a second, fake row.
 private let guiPrintWithInjectedRow = """
 gui/501 = {
+	service count = 2
 	services = {
 		       0      - 	dev.attacker.labeltest
 		   12345      - 	com.fake.row
@@ -199,63 +202,84 @@ gui/501/com.example.agent = {
 """
 
 struct ListingInjectionTests {
-    @Test func listedLabelsWithoutADumpBlockAreSuspect() throws {
+    @Test func injectedRowBreaksTheServiceCount() throws {
+        // Two services, three rows: one row came from a newline in a label.
         let listing = try #require(DomainListing.parse(guiPrintWithInjectedRow, domain: "gui/501"))
-        let snapshot = LoadedSnapshot.build(
-            listings: ["gui/501": listing],
-            details: LaunchctlDump.serviceBlocks(dumpForInjectedRow, domains: ["gui/501"]))
+        #expect(!listing.isStructurallySound)
+    }
 
+    @Test func forgedDumpBlocksCantVouchForAnInjectedRow() throws {
+        // The attacker also forges a dump header for its fake row; the count check doesn't consult the dump.
+        let listing = try #require(DomainListing.parse(guiPrintWithInjectedRow, domain: "gui/501"))
+        let forgedDump = dumpForInjectedRow + "\ngui/501/com.fake.row = {\n\tstate = running\n}\n"
+        let snapshot = LoadedSnapshot.build(
+            listings: ["gui/501": listing], details: LaunchctlDump.serviceBlocks(forgedDump, domains: ["gui/501"]))
         let fake = try #require(snapshot.jobs.first { $0.label == "com.fake.row" })
         #expect(fake.rowSuspect)
-        #expect(fake.pid == nil)
         #expect(!fake.isRunning)
-        #expect(snapshot.jobs.first { $0.label == "dev.attacker.labeltest" }?.rowSuspect == true)
-
-        let genuine = try #require(snapshot.jobs.first { $0.label == "com.example.agent" })
-        #expect(!genuine.rowSuspect)
-        #expect(genuine.pid == 777)
     }
 
-    @Test func withoutADumpRowsCantBeVerifiedAndStayTrusted() throws {
+    @Test func unsoundListingKeepsEveryRowVisibleButSuspect() throws {
         let listing = try #require(DomainListing.parse(guiPrintWithInjectedRow, domain: "gui/501"))
         let snapshot = LoadedSnapshot.build(listings: ["gui/501": listing], details: nil)
-        #expect(snapshot.jobs.allSatisfy { !$0.rowSuspect })
+        #expect(Set(snapshot.jobs.map(\.label)) == ["dev.attacker.labeltest", "com.fake.row", "com.example.agent"])
+        #expect(snapshot.jobs.allSatisfy { $0.rowSuspect && $0.pid == nil })
+        // Its disabled list and its "not loaded" evidence can't be trusted either.
+        #expect(snapshot.disabled["gui/501"] == nil)
+        #expect(snapshot.queriedDomains == [])
     }
 
-    @Test func duplicateLabelRowsAreSuspect() throws {
-        let text = "system = {\n\tservices = {\n\t\t   12345      - \tcom.example.a\n\t\t       0      0 \tcom.example.a\n\t}\n}\n"
+    @Test func soundListingRowsAreTrustedWithoutADump() throws {
+        let text = "system = {\n\tservice count = 1\n\tservices = {\n\t\t     612      - \tcom.example.a\n\t}\n}\n"
         let listing = try #require(DomainListing.parse(text, domain: "system"))
+        #expect(listing.isStructurallySound)
         let job = try #require(LoadedSnapshot.build(listings: ["system": listing], details: nil).jobs.first)
-        #expect(job.rowSuspect)
-        #expect(job.pid == nil)
+        #expect(!job.rowSuspect)
+        #expect(job.pid == 612)
+    }
+
+    @Test func injectedSectionCloseThatHidesRowsIsCaught() throws {
+        // A label ending in "\n\t}" closes the services section early; the real rows after it would be skipped.
+        let text = "gui/501 = {\n\tservice count = 3\n\tservices = {\n\t\t       0      - \tdev.attacker.hider\n\t}\n"
+            + "\t\t     777      - \tcom.example.hidden\n\t\t       0      0 \tcom.example.alsohidden\n\t}\n}\n"
+        let listing = try #require(DomainListing.parse(text, domain: "gui/501"))
+        #expect(!listing.isStructurallySound)
+    }
+
+    @Test func rowsInsideOtherNestedBlocksAreFine() throws {
+        let text = "system = {\n\tservice count = 1\n\tsubdomains = {\n\t\tpid/1\n\t}\n"
+            + "\tservices = {\n\t\t     612      - \tcom.example.a\n\t}\n"
+            + "\tendpoints = {\n\t\t\"com.example.a\" = {\n\t\t\tport = 0x1\n\t\t}\n\t}\n}\n"
+        #expect(try #require(DomainListing.parse(text, domain: "system")).isStructurallySound)
+    }
+
+    @Test func missingServiceCountIsUnsound() throws {
+        let text = "system = {\n\tservices = {\n\t\t     612      - \tcom.example.a\n\t}\n}\n"
+        #expect(try #require(DomainListing.parse(text, domain: "system")).isStructurallySound == false)
+    }
+
+    @Test func serviceCountIsReadFromTheHeaderOnly() throws {
+        // A forged "service count" line later in the listing doesn't replace the real one.
+        let text = "system = {\n\tservice count = 1\n\tservices = {\n\t\t     612      - \tcom.example.a\n\t}\n\tservice count = 5\n}\n"
+        let listing = try #require(DomainListing.parse(text, domain: "system"))
+        #expect(listing.declaredServiceCount == 1)
+        #expect(listing.isStructurallySound)
     }
 
     @Test func repeatedSectionsBreakTheListing() throws {
-        // A label can close the services section and open a fake disabled list.
-        let text = """
-        gui/501 = {
-        	services = {
-        		       0      - 	dev.attacker.x
-        	}
-        	disabled services = {
-        		"com.example.victim" => disabled
-        	}
-        	disabled services = {
-        	}
-        }
-        """
-        let listing = try #require(DomainListing.parse(text, domain: "gui/501"))
-        #expect(!listing.isStructurallySound)
+        let text = "gui/501 = {\n\tservice count = 1\n\tservices = {\n\t\t       0      - \tdev.attacker.x\n\t}\n"
+            + "\tdisabled services = {\n\t\t\"com.example.victim\" => disabled\n\t}\n\tdisabled services = {\n\t}\n}\n"
+        #expect(try #require(DomainListing.parse(text, domain: "gui/501")).isStructurallySound == false)
     }
 
     @Test func malformedRowsBreakTheListing() throws {
-        let text = "gui/501 = {\n\tservices = {\n\t\tnot a row at all\n\t}\n}\n"
-        let listing = try #require(DomainListing.parse(text, domain: "gui/501"))
-        #expect(!listing.isStructurallySound)
+        let text = "gui/501 = {\n\tservice count = 1\n\tservices = {\n\t\tnot a row at all\n\t}\n}\n"
+        #expect(try #require(DomainListing.parse(text, domain: "gui/501")).isStructurallySound == false)
     }
 
-    @Test func wellFormedListingIsSound() throws {
-        #expect(try #require(DomainListing.parse(guiPrintWithInjectedRow, domain: "gui/501")).isStructurallySound)
+    @Test func fixtureListingsAreSound() throws {
+        #expect(try #require(DomainListing.parse(systemPrint, domain: "system")).isStructurallySound)
+        #expect(try #require(DomainListing.parse(guiPrint, domain: "gui/501")).isStructurallySound)
     }
 }
 

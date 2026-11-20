@@ -22,8 +22,8 @@ struct LoadedJob: Sendable, Hashable {
     /// The dump held more than one block for this job, so someone wrote fake ones. The details from the dump
     /// were dropped; what's left comes from the domain listing.
     var detailsTampered = false
-    /// The domain listing's row for this job looks forged: its label is listed twice, or it has no block in the
-    /// dump (a newline in some job's label can print a fake row). Its PID isn't trusted.
+    /// The domain listing this row came from looks forged (a newline in some job's label can add or hide
+    /// rows), or its label is listed twice. Its PID isn't trusted and its state is unknown.
     var rowSuspect = false
 
     /// From the domain listing's PID column, not the dump, so another job can't fake it.
@@ -48,9 +48,13 @@ struct DomainListing: Sendable, Equatable {
     /// Labels listed more than once. launchd lists each label once per domain, so a repeat means someone forged
     /// a row; the first row is kept and the job is flagged.
     var suspectLabels: Set<String> = []
-    /// `false` when a section appears twice or a row in it doesn't parse. launchd prints each section once, so
-    /// either means a label with newlines rewrote the listing's structure, and none of it can be trusted.
+    /// `false` when the listing's structure doesn't match what launchd prints: the row count differs from the
+    /// header's `service count`, a section repeats, a row doesn't parse, or row-like lines appear outside any
+    /// block. Any of these means a label with newlines rewrote the listing, so none of its rows, PIDs or
+    /// disabled entries can be trusted.
     var isStructurallySound = true
+    /// `service count` from the listing's header, printed before any label.
+    var declaredServiceCount: Int?
 
     /// `nil` unless `text` is `launchctl print` output for `domain`.
     static func parse(_ text: String, domain: String) -> DomainListing? {
@@ -60,44 +64,83 @@ struct DomainListing: Sendable, Equatable {
         var services: [String: Service] = [:]
         var disabled: [String: Bool] = [:]
         var suspect: Set<String> = []
+        var rowCount = 0
+        var declaredCount: Int?
+        var inHeader = true
         var isSound = true
         var seenServices = false
         var seenDisabled = false
-        enum Section { case none, services, disabled }
+        var closed = false
+        enum Section { case none, services, disabled, other(depth: Int) }
         var section = Section.none
 
         for line in lines.dropFirst() {
+            if closed {
+                // Nothing follows the domain's closing brace except a trailing newline.
+                if !line.isEmpty { isSound = false }
+                continue
+            }
             switch section {
             case .none:
-                if line == "\tservices = {" {
+                if line.isEmpty { continue }
+                if line == "}" {
+                    closed = true
+                } else if line == "\tservices = {" {
+                    inHeader = false
                     if seenServices { isSound = false }
                     seenServices = true
                     section = .services
                 } else if line == "\tdisabled services = {" {
+                    inHeader = false
                     if seenDisabled { isSound = false }
                     seenDisabled = true
                     section = .disabled
+                } else if line.hasPrefix("\t"), !line.hasPrefix("\t\t"), line.hasSuffix(" = {") {
+                    inHeader = false
+                    section = .other(depth: 1)
+                } else if line.hasPrefix("\t"), !line.hasPrefix("\t\t"), !line.hasPrefix("\t}"),
+                          let range = line.range(of: " = ") {
+                    // A plain "key = value" field. The count is taken from the header only: a label printed
+                    // later can't supply one.
+                    if inHeader, declaredCount == nil, line[line.index(after: line.startIndex)..<range.lowerBound] == "service count" {
+                        declaredCount = Int(line[range.upperBound...])
+                    }
+                } else {
+                    // A row-like line, a stray brace, or anything else outside a block: the structure was rewritten.
+                    isSound = false
+                }
+            case .other(let depth):
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed == "}" {
+                    section = depth == 1 ? .none : .other(depth: depth - 1)
+                } else if line.hasSuffix("{") {
+                    section = .other(depth: depth + 1)
                 }
             case .services, .disabled:
                 if line == "\t}" {
                     section = .none
                     continue
                 }
-                if section == .services, let (label, service) = parseServiceRow(line) {
+                if case .services = section, let (label, service) = parseServiceRow(line) {
+                    rowCount += 1
                     if services[label] == nil {
                         services[label] = service
                     } else {
                         suspect.insert(label)
                     }
-                } else if section == .disabled, let (label, isDisabled) = parseDisabledEntry(line) {
+                } else if case .disabled = section, let (label, isDisabled) = parseDisabledEntry(line) {
                     disabled[label] = isDisabled
                 } else {
                     isSound = false
                 }
             }
         }
+        // launchd prints the service count before any label; a newline in a label can add or hide rows but can't
+        // change that number, so a mismatch means the rows were tampered with.
+        if declaredCount == nil || declaredCount != rowCount || !closed { isSound = false }
         return DomainListing(
-            services: services, disabled: disabled, suspectLabels: suspect, isStructurallySound: isSound)
+            services: services, disabled: disabled, suspectLabels: suspect, isStructurallySound: isSound,
+            declaredServiceCount: declaredCount)
     }
 
     /// `\t\t     612      - \tcom.example.job`: PID, status, then a tab before the label.
@@ -151,13 +194,14 @@ struct LoadedSnapshot: Sendable {
         listings: [String: DomainListing], details: [ServiceKey: [[String: String]]]?, issues: [String] = []
     ) -> LoadedSnapshot {
         var jobs: [LoadedJob] = []
+        // Rows of an unsound listing stay visible, but nothing about them is trusted, and the domain can't
+        // vouch that a plist isn't loaded.
+        let soundListings = listings.filter { $0.value.isStructurallySound }
         for (domain, listing) in listings.sorted(by: { $0.key < $1.key }) {
             for (label, service) in listing.services.sorted(by: { $0.key < $1.key }) {
                 let blocks = details?[ServiceKey(domain: domain, label: label)] ?? []
                 let tampered = blocks.count > 1 || listing.suspectLabels.contains(label)
-                // Every real listing row has exactly one dump block (checked on macOS 27.3). A row injected by a
-                // newline in a label has none. Without a dump there's nothing to check against.
-                let rowSuspect = listing.suspectLabels.contains(label) || (details != nil && blocks.isEmpty)
+                let rowSuspect = !listing.isStructurallySound || listing.suspectLabels.contains(label)
                 let fields = !tampered && blocks.count == 1 ? blocks[0] : [:]
                 let rawPath = fields["path"]
                 let isFile = rawPath?.hasPrefix("/") ?? false
@@ -178,7 +222,8 @@ struct LoadedSnapshot: Sendable {
             }
         }
         return LoadedSnapshot(
-            jobs: jobs, disabled: listings.mapValues(\.disabled), queriedDomains: Set(listings.keys), issues: issues)
+            jobs: jobs, disabled: soundListings.mapValues(\.disabled), queriedDomains: Set(soundListings.keys),
+            issues: issues)
     }
 }
 
