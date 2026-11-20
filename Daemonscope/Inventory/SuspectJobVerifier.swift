@@ -63,10 +63,12 @@ enum SuspectJobVerifier {
             }
             switch lookup(domain: job.domain, label: job.label, launchctl: launchctl) {
             case .found(let fields):
-                // The listing is sound, so its PID and status stand; the details come from launchd directly.
+                // The listing is sound, so its PID and status stand, unless this label was listed twice, in which
+                // case the PID column can't be trusted and running comes from launchd's direct `state`.
                 let service = listings[job.domain]?.services[job.label]
+                let listedTwice = listings[job.domain]?.suspectLabels.contains(job.label) ?? false
                 outcome.jobs.append(LoadedJob(
-                    domain: job.domain, label: job.label, fields: fields, pid: service?.pid,
+                    domain: job.domain, label: job.label, fields: fields, pid: listedTwice ? nil : service?.pid,
                     lastExit: service.flatMap { $0.status == "-" ? nil : $0.status }, verifiedIndividually: true))
                 outcome.confirmed += 1
             case .notFound:
@@ -97,9 +99,12 @@ enum SuspectJobVerifier {
                         outcome.jobs.append(job)
                     }
                 case .failed:
-                    if let job = snapshot.jobs.first(where: { $0.domain == domain && $0.label == label }) {
-                        outcome.jobs.append(job)
-                    }
+                    // No answer either way. Keep it visible as suspect, whether it came from the listing or only
+                    // from a dump header (a job the forgery may have hidden).
+                    outcome.jobs.append(snapshot.jobs.first { $0.domain == domain && $0.label == label }
+                        ?? LoadedJob(
+                            domain: domain, label: label, path: nil, submittedBy: nil, type: nil, state: nil, pid: nil,
+                            program: nil, lastExit: nil, parentBundleID: nil, rowSuspect: true))
                 }
             }
             outcome.rebuiltDomains.append(domain)
