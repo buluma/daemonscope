@@ -71,6 +71,7 @@ struct DomainListing: Sendable, Equatable {
         var seenServices = false
         var seenDisabled = false
         var closed = false
+        var seenBlocks: Set<String> = []
         enum Section { case none, services, disabled, other(depth: Int) }
         var section = Section.none
 
@@ -97,6 +98,8 @@ struct DomainListing: Sendable, Equatable {
                     section = .disabled
                 } else if line.hasPrefix("\t"), !line.hasPrefix("\t\t"), line.hasSuffix(" = {") {
                     inHeader = false
+                    // launchd prints each top-level block once; a repeat means a label reopened one.
+                    if !seenBlocks.insert(line).inserted { isSound = false }
                     section = .other(depth: 1)
                 } else if line.hasPrefix("\t"), !line.hasPrefix("\t\t"), !line.hasPrefix("\t}"),
                           let range = line.range(of: " = ") {
@@ -110,6 +113,20 @@ struct DomainListing: Sendable, Equatable {
                     isSound = false
                 }
             case .other(let depth):
+                // Other blocks are skipped, but they must not swallow rows: a label can close `services` and open
+                // a dummy block so the real rows after it land here, while fake rows keep the count right.
+                if parseServiceRow(line) != nil || parseDisabledEntry(line) != nil {
+                    isSound = false
+                }
+                if line.hasPrefix("\t"), !line.hasPrefix("\t\t") {
+                    // Inside a nested block only its own closing brace sits one tab deep.
+                    if depth == 1, line == "\t}" {
+                        section = .none
+                    } else {
+                        isSound = false
+                    }
+                    continue
+                }
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 if trimmed == "}" {
                     section = depth == 1 ? .none : .other(depth: depth - 1)
@@ -201,7 +218,10 @@ struct LoadedSnapshot: Sendable {
             for (label, service) in listing.services.sorted(by: { $0.key < $1.key }) {
                 let blocks = details?[ServiceKey(domain: domain, label: label)] ?? []
                 let tampered = blocks.count > 1 || listing.suspectLabels.contains(label)
+                // Every genuine row has exactly one dump block (checked on macOS 27.3). The dump can be forged, so
+                // a block doesn't prove a row genuine, but a missing one is still a reason for doubt.
                 let rowSuspect = !listing.isStructurallySound || listing.suspectLabels.contains(label)
+                    || (details != nil && blocks.isEmpty)
                 let fields = !tampered && blocks.count == 1 ? blocks[0] : [:]
                 let rawPath = fields["path"]
                 let isFile = rawPath?.hasPrefix("/") ?? false
