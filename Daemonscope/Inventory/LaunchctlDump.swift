@@ -25,9 +25,13 @@ struct LoadedJob: Sendable, Hashable {
     /// The domain listing this row came from looks forged (a newline in some job's label can add or hide
     /// rows), or its label is listed twice. Its PID isn't trusted and its state is unknown.
     var rowSuspect = false
+    /// launchd confirmed this job with a per-job `launchctl print`, which another job can't forge.
+    var verifiedIndividually = false
 
-    /// From the domain listing's PID column, not the dump, so another job can't fake it.
-    var isRunning: Bool { pid != nil }
+    /// From the domain listing's PID column, not the dump, so another job can't fake it. A job rebuilt from a
+    /// forged domain has no trustworthy PID column, so its own per-job `state` (printed before any nested
+    /// block) decides.
+    var isRunning: Bool { pid != nil || (verifiedIndividually && state == "running") }
 }
 
 /// One domain as `launchctl print <domain>` lists it.

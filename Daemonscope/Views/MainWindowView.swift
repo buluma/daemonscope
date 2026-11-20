@@ -330,6 +330,12 @@ private struct JobDetailView: View {
                     .foregroundStyle(.orange)
                     .font(.caption)
             }
+            if loaded.verifiedIndividually {
+                Label("The bulk launchd output for this job looked forged, so launchd was asked about it directly. The details shown come from that answer.",
+                      systemImage: "checkmark.shield")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             LabeledContent("Domain", value: loaded.domain)
             if let state = loaded.state { LabeledContent("Reported State", value: state) }
             if let pid = loaded.pid { LabeledContent("PID", value: String(pid)) }
