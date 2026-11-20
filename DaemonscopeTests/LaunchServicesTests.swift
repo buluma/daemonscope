@@ -237,3 +237,23 @@ struct LaunchServicesStoreTests {
         #expect(!store.isRefreshing)
     }
 }
+
+struct AppFilterTests {
+    private func app(_ name: String, schemes: [String] = [], types: [String] = [], bundleID: String? = nil) -> AppRecord {
+        AppRecord(path: "/Applications/\(name).app", resolvedPath: "/Applications/\(name).app", bundleID: bundleID,
+                  name: name, version: nil, urlSchemes: schemes, contentTypes: types)
+    }
+
+    @Test func onlyWithAssociationsDropsAppsThatDeclareNothing() {
+        let apps = [app("Mailer", schemes: ["mailto"]), app("Viewer", types: ["public.png"]), app("Clock")]
+        #expect(AppFilter(onlyWithAssociations: true).apply(to: apps).map(\.name) == ["Mailer", "Viewer"])
+        #expect(AppFilter(onlyWithAssociations: false).apply(to: apps).map(\.name) == ["Mailer", "Viewer", "Clock"])
+    }
+
+    @Test func queryMatchesNameBundleIDOrPath() {
+        let apps = [app("Mailer", bundleID: "com.example.mail"), app("Clock", bundleID: "com.example.time")]
+        #expect(AppFilter(query: "mail").apply(to: apps).map(\.name) == ["Mailer"])
+        #expect(AppFilter(query: "TIME").apply(to: apps).map(\.name) == ["Clock"])
+        #expect(AppFilter(query: "/Applications/Clock").apply(to: apps).map(\.name) == ["Clock"])
+    }
+}

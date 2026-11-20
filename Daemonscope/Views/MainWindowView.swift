@@ -115,20 +115,7 @@ private struct JobTableView: View {
 
     private var filterBar: some View {
         HStack(spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Label, program, or path", text: $filter.query)
-                    .textFieldStyle(.plain)
-                if !filter.query.isEmpty {
-                    Button("Clear Search", systemImage: "xmark.circle.fill") { filter.query = "" }
-                        .labelStyle(.iconOnly)
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .glassEffect(in: .capsule)
+            SearchField(prompt: "Label, program, or path", text: $filter.query)
 
             Menu {
                 Picker("State", selection: $filter.state) {
