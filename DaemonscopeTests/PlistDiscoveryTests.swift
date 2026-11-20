@@ -158,6 +158,23 @@ struct PlistDiscoveryTests {
         #expect(scan.issues.isEmpty)
     }
 
+    @Test func recordsSymlinkTargets() throws {
+        let fixture = try Fixture()
+        let target = try fixture.writePlist("Vendor/Real.app/Contents/Resources/com.vendor.agent.plist", ["Label": "com.vendor.agent"])
+        try FileManager.default.createDirectory(at: fixture.url("Agents"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: fixture.url("Agents/com.vendor.agent.plist"), withDestinationURL: target)
+        try fixture.writePlist("Agents/plain.plist", ["Label": "plain"])
+
+        let scan = PlistDiscovery(
+            jobDirectories: [.init(url: fixture.url("Agents"), location: .globalAgents)], appSearchRoots: []
+        ).scan()
+
+        let linked = try #require(scan.jobs.first { $0.label == "com.vendor.agent" })
+        #expect(linked.path == fixture.url("Agents/com.vendor.agent.plist").path)
+        #expect(linked.symlinkTarget == target.path)
+        #expect(scan.jobs.first { $0.label == "plain" }?.symlinkTarget == nil)
+    }
+
     @Test func missingDirectoryIsNotAnIssue() throws {
         let fixture = try Fixture()
         let discovery = PlistDiscovery(

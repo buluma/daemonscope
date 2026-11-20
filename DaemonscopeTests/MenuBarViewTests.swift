@@ -21,8 +21,9 @@ struct MenuBarViewTests {
                     fromPropertyList: ["Label": "com.example.job\(index)"], format: .xml, options: 0)
                 try data.write(to: folder.appendingPathComponent("job\(index).plist"))
             }
-            let store = DiskInventoryStore(
+            let store = InventoryStore(
                 discovery: PlistDiscovery(jobDirectories: [.init(url: folder, location: .userAgents)], appSearchRoots: []),
+                collector: LaunchctlCollector { LoadedSnapshot(jobs: [], disabled: ["system": [:]]) },
                 refreshInterval: nil)
             await store.refresh()
             return NSHostingController(rootView: MenuBarView(store: store))

@@ -43,6 +43,8 @@ struct DiskJob: Identifiable, Sendable, Hashable, CustomStringConvertible {
     var id: String { path }
 
     let path: String
+    /// Where `path` points when it's a symlink. launchd reports the resolved file, so matching needs both.
+    var symlinkTarget: String?
     let location: JobLocation
     /// The `.app` bundle that contains the plist, for app-bundled jobs.
     let owningApp: String?
@@ -101,6 +103,7 @@ struct DiskJob: Identifiable, Sendable, Hashable, CustomStringConvertible {
 
         return DiskJob(
             path: path,
+            symlinkTarget: nil,
             location: location,
             owningApp: owningApp,
             label: label,
