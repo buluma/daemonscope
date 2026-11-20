@@ -82,7 +82,8 @@ struct PlistDiscovery: Sendable {
         for file in entries where file.pathExtension == "plist" {
             do {
                 let data = try Data(contentsOf: file)
-                let job = try DiskJob.parse(data: data, path: file.path, location: location, owningApp: owningApp)
+                var job = try DiskJob.parse(data: data, path: file.path, location: location, owningApp: owningApp)
+                job.symlinkTarget = Self.symlinkTarget(of: file)
                 if job.label == nil {
                     issues.append(ScanIssue(path: file.path, message: "Missing or empty Label; launchd won't load this job."))
                 }
@@ -95,6 +96,16 @@ struct PlistDiscovery: Sendable {
                 issues.append(ScanIssue(path: file.path, message: "Couldn't read file: \(error.localizedDescription)"))
             }
         }
+    }
+
+    /// The fully resolved path when `file` is a symlink, else `nil`. Uses realpath(3) because
+    /// `resolvingSymlinksInPath()` rewrites "/private/var/…" back to "/var/…", which launchd never reports.
+    private static func symlinkTarget(of file: URL) -> String? {
+        guard (try? file.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true,
+              let resolved = realpath(file.path, nil)
+        else { return nil }
+        defer { free(resolved) }
+        return String(cString: resolved)
     }
 
     /// `.app` bundles under the search roots. Doesn't descend into a bundle once found, so helper apps nested

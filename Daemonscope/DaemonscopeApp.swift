@@ -5,7 +5,7 @@ import SwiftUI
 struct DaemonscopeApp: App {
     static let mainWindowID = "main"
 
-    @State private var store = DiskInventoryStore()
+    @State private var store = InventoryStore()
 
     var body: some Scene {
         // LSUIElement apps are never active on their own, so the menu bar extra is the app's only
