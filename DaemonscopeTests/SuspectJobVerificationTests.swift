@@ -29,7 +29,7 @@ private func listing(_ domain: String, _ rows: [(pid: Int, label: String)]) -> S
 }
 
 private func collect(_ fake: FakeLaunchctl) throws -> LoadedSnapshot {
-    try LaunchctlCollector(uid: 501) { try fake($0) }.collect()
+    try LaunchctlCollector(uid: 501) { args, _ in try fake(args) }.collect()
 }
 
 struct SuspectJobVerificationTests {
@@ -176,12 +176,29 @@ struct SuspectJobVerificationTests {
         let snapshot = LoadedSnapshot.build(listings: ["system": listing], details: nil)
         let outcome = SuspectJobVerifier.verify(
             snapshot: snapshot, listings: ["system": listing], details: nil,
-            launchctl: { _ in "system/com.example.a = {\n\tstate = running\n}\n" })
+            timeRemaining: { .seconds(30) }, launchctl: { _, _ in "system/com.example.a = {\n\tstate = running\n}\n" })
         let job = try #require(outcome.jobs.first)
         #expect(job.verifiedIndividually)
         #expect(job.pid == nil)
         // Running comes from launchd's direct answer instead.
         #expect(job.isRunning)
+    }
+
+    @Test func expiredBudgetPreservesConfirmedAndUncheckedJobs() throws {
+        let listing = DomainListing(services: ["a": .init(pid: nil, status: "-"), "b": .init(pid: nil, status: "-")], disabled: [:])
+        let listings = ["system": listing]
+        let snapshot = LoadedSnapshot.build(listings: listings, details: [:])
+        var calls = 0
+        let outcome = SuspectJobVerifier.verify(snapshot: snapshot, listings: listings, details: [:],
+            timeRemaining: { calls == 0 ? .seconds(2) : .zero }, launchctl: { args, timeout in
+                calls += 1
+                #expect(timeout == .seconds(2))
+                return "\(args[1]) = {\n\tstate = running\n}\n"
+            })
+        #expect(calls == 1)
+        #expect(outcome.skipped == 1)
+        #expect(outcome.jobs.filter(\.verifiedIndividually).count == 1)
+        #expect(outcome.jobs.filter(\.rowSuspect).count == 1)
     }
 
     @Test func healthyJobsAreNotQueriedOneByOne() throws {

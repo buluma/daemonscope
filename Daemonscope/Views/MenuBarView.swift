@@ -85,6 +85,15 @@ struct MenuBarView: View {
                         }
                     }
                     .font(.callout)
+                    if let unknown = counts[.unknown], unknown > 0 {
+                        CountLabel(state: .unknown, count: unknown)
+                    }
+                    if let warning = store.loadedIssues.first {
+                        Label(warning, systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .help(store.loadedIssues.joined(separator: "\n"))
+                    }
                 }
                 HStack(spacing: 4) {
                     if let loadedDate = store.loadedDate {

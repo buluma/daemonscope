@@ -13,7 +13,7 @@ struct MenuBarViewTests {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
 
-        func height(jobCount: Int) async throws -> CGFloat {
+        func height(jobCount: Int, partial: Bool = false) async throws -> CGFloat {
             let folder = root.appendingPathComponent("jobs-\(jobCount)")
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             for index in 0..<jobCount {
@@ -23,7 +23,8 @@ struct MenuBarViewTests {
             }
             let store = InventoryStore(
                 discovery: PlistDiscovery(jobDirectories: [.init(url: folder, location: .userAgents)], appSearchRoots: []),
-                collector: LaunchctlCollector { LoadedSnapshot(jobs: [], disabled: ["system": [:]]) },
+                collector: LaunchctlCollector { LoadedSnapshot(jobs: [], disabled: [:],
+                    queriedDomains: partial ? ["system"] : nil, issues: partial ? ["Couldn't list gui/501: unavailable"] : []) },
                 refreshInterval: nil)
             await store.refresh()
             return NSHostingController(rootView: MenuBarView(store: store))
@@ -32,6 +33,9 @@ struct MenuBarViewTests {
 
         let empty = try await height(jobCount: 0)
         let populated = try await height(jobCount: 5)
+
+        let partial = try await height(jobCount: 5, partial: true)
+        #expect(partial > populated)
 
         // Five rows of a label plus a caption need well over 100 points.
         #expect(populated - empty > 100)

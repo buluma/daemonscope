@@ -46,7 +46,7 @@ Every job plist found on disk, merged with what launchd reports as loaded:
 | Unknown | launchd couldn't be queried, or its answer for this job couldn't be trusted. |
 
 - Plists are read from `~/Library/LaunchAgents`, `/Library/LaunchAgents`, `/Library/LaunchDaemons`, `/System/Library/LaunchAgents`, `/System/Library/LaunchDaemons`, and the `Contents/Library/LaunchAgents` and `LaunchDaemons` folders of apps in `/Applications` and `~/Applications`.
-- Loaded state comes from the `system`, `user/<uid>` and `gui/<uid>` domains. Refreshes run every 5 minutes and on demand.
+- Loaded state comes from the `system`, `user/<uid>` and `gui/<uid>` domains. Refreshes run every 5 minutes and on demand. All launchctl calls in a refresh share a 30-second budget. If time runs out during individual checks, confirmed results are kept and unchecked candidates appear as Unknown. The menu shows partial-refresh warnings and the number of third-party jobs with unknown state.
 - Apple's jobs are hidden by default. A job counts as Apple's only when its plist is under `/System/Library` or `/Library/Apple`, which System Integrity Protection guards; a `com.apple.*` label alone doesn't count, since anyone with admin rights can choose it.
 - Per-app instances created for running apps are hidden by default too; the Filter menu shows them.
 - Environment variables in plists can hold secrets. They stay hidden until you ask, and are never logged.
