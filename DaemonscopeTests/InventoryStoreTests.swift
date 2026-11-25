@@ -105,7 +105,7 @@ struct LaunchctlCollectorTests {
     private static let guiListing = "gui/501 = {\n\tservice count = 0\n\tservices = {\n\t}\n}\n"
 
     @Test func collectsListingsAndDetails() throws {
-        let collector = LaunchctlCollector(uid: 501) { arguments in
+        let collector = LaunchctlCollector(uid: 501) { arguments, _ in
             switch arguments {
             case ["print", "system"]: return Self.systemListing
             case ["print", "gui/501"]: return Self.guiListing
@@ -123,7 +123,7 @@ struct LaunchctlCollectorTests {
     }
 
     @Test func structurallyBrokenListingKeepsJobsButNotTheDomain() throws {
-        let collector = LaunchctlCollector(uid: 501) { arguments in
+        let collector = LaunchctlCollector(uid: 501) { arguments, _ in
             switch arguments {
             case ["print", "system"]: return Self.systemListing
             case ["print", "gui/501"]:
@@ -139,7 +139,7 @@ struct LaunchctlCollectorTests {
     }
 
     @Test func dumpstateFailureKeepsListingsAndReportsIt() throws {
-        let collector = LaunchctlCollector(uid: 501) { arguments in
+        let collector = LaunchctlCollector(uid: 501) { arguments, _ in
             if arguments == ["dumpstate"] { throw LaunchctlCollector.CollectError.timedOut }
             return arguments == ["print", "system"] ? Self.systemListing : Self.guiListing.replacingOccurrences(
                 of: "gui/501", with: arguments[1])
@@ -151,7 +151,7 @@ struct LaunchctlCollectorTests {
     }
 
     @Test func noDomainListedIsAnError() {
-        let collector = LaunchctlCollector(uid: 501) { _ in "Usage: launchctl <subcommand>\n" }
+        let collector = LaunchctlCollector(uid: 501) { _, _ in "Usage: launchctl <subcommand>\n" }
         #expect(throws: LaunchctlCollector.CollectError.self) { try collector.collect() }
     }
 

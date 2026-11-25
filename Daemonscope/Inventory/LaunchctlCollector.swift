@@ -32,14 +32,21 @@ struct LaunchctlCollector: Sendable {
     }
 
     /// Collects `uid`'s domains, running launchctl with the given arguments through `launchctl`.
-    init(uid: uid_t, launchctl: @escaping @Sendable ([String]) throws -> String) {
+    init(uid: uid_t, launchctl: @escaping @Sendable ([String], Duration) throws -> String) {
         body = {
+            let deadline = ContinuousClock.now + .seconds(30)
+            func remaining() -> Duration { ContinuousClock.now.duration(to: deadline) }
+            func collectOutput(_ arguments: [String]) throws -> String {
+                let timeout = remaining()
+                guard timeout > .zero else { throw CollectError.timedOut }
+                return try launchctl(arguments, timeout)
+            }
             var listings: [String: DomainListing] = [:]
             var issues: [String] = []
             var firstError: Error?
             for domain in ["system", "user/\(uid)", "gui/\(uid)"] {
                 do {
-                    guard let listing = DomainListing.parse(try launchctl(["print", domain]), domain: domain) else {
+                    guard let listing = DomainListing.parse(try collectOutput(["print", domain]), domain: domain) else {
                         throw CollectError.unrecognizedOutput
                     }
                     listings[domain] = listing
@@ -53,15 +60,18 @@ struct LaunchctlCollector: Sendable {
 
             var details: [ServiceKey: [[String: String]]]?
             do {
-                details = LaunchctlDump.serviceBlocks(try launchctl(["dumpstate"]), domains: Set(listings.keys))
+                details = LaunchctlDump.serviceBlocks(try collectOutput(["dumpstate"]), domains: Set(listings.keys))
             } catch {
                 issues.append("Job details unavailable: \(error.localizedDescription)")
             }
             let snapshot = LoadedSnapshot.build(listings: listings, details: details)
             let outcome = SuspectJobVerifier.verify(
-                snapshot: snapshot, listings: listings, details: details, launchctl: launchctl)
+                snapshot: snapshot, listings: listings, details: details, timeRemaining: remaining, launchctl: launchctl)
             for domain in outcome.rebuiltDomains {
-                issues.append("\(domain)'s listing looks forged, so its jobs were checked one by one and its disabled list was ignored.")
+                issues.append("\(domain)'s listing looks forged, so only individually confirmed jobs have known state and its disabled list was ignored.")
+            }
+            if outcome.skipped > 0 {
+                issues.append("Refresh time limit reached. Unchecked jobs: \(outcome.skipped). Their state is unknown.")
             }
             if outcome.confirmed > 0 {
                 issues.append("\(outcome.confirmed) jobs had conflicting launchd output and were confirmed directly; another job may be forging entries.")
@@ -70,7 +80,7 @@ struct LaunchctlCollector: Sendable {
             if tampered > 0 {
                 issues.append("launchd's dump held conflicting entries for \(tampered) jobs; their details were ignored.")
             }
-            let suspect = outcome.jobs.filter(\.rowSuspect).count
+            let suspect = outcome.jobs.filter(\.rowSuspect).count - outcome.skipped
             if suspect > 0 {
                 issues.append("\(suspect) listed jobs couldn't be confirmed and may be forged; their state is unknown.")
             }
@@ -79,8 +89,8 @@ struct LaunchctlCollector: Sendable {
         }
     }
 
-    static let live = LaunchctlCollector(uid: getuid()) { arguments in
-        try run(executable: "/bin/launchctl", arguments: arguments, timeout: .seconds(30))
+    static let live = LaunchctlCollector(uid: getuid()) { arguments, timeout in
+        try run(executable: "/bin/launchctl", arguments: arguments, timeout: timeout)
     }
 
     func collect() throws -> LoadedSnapshot {
@@ -120,16 +130,19 @@ struct LaunchctlCollector: Sendable {
         let timer = DispatchWorkItem { [process] in
             if process.isRunning {
                 didTimeOut.flag = true
-                process.terminate()
+                // This read-only diagnostic has no state to save. Enforce the deadline even if it ignores SIGTERM.
+                kill(process.processIdentifier, SIGKILL)
             }
         }
         let seconds = Double(timeout.components.seconds) + Double(timeout.components.attoseconds) / 1e18
-        DispatchQueue.global().asyncAfter(deadline: .now() + seconds, execute: timer)
+        let timerQueue = DispatchQueue(label: "Daemonscope.launchctl-timeout")
+        timerQueue.asyncAfter(deadline: .now() + seconds, execute: timer)
 
         // Drain stdout before waiting: dumpstate prints megabytes, far more than a pipe buffer holds.
         let output = stdout.fileHandleForReading.readDataToEndOfFile()
         exited.wait()
         timer.cancel()
+        timerQueue.sync {} // Finish any timeout callback before reading its flag.
         errorReader.wait()
 
         if didTimeOut.flag {
@@ -143,7 +156,7 @@ struct LaunchctlCollector: Sendable {
     }
 
     /// A mutable box shared with the reader and timer callbacks. Each field has a single writer, and every read
-    /// happens after that writer finished (`errorReader.wait()`, the termination semaphore).
+    /// happens after that writer finished (`errorReader.wait()`, the timer queue barrier).
     private final class SharedBox: @unchecked Sendable {
         var data = Data()
         var flag = false

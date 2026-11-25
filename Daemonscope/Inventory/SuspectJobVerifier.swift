@@ -21,6 +21,8 @@ enum SuspectJobVerifier {
         var jobs: [LoadedJob]
         /// Rows in a sound listing that launchd denies having, removed.
         var removed = 0
+        /// Candidates left unchecked when the refresh budget expired.
+        var skipped = 0
         /// Jobs in a sound listing whose bulk output conflicted and that launchd then confirmed directly.
         var confirmed = 0
         /// Domains whose forged listing was rebuilt job by job.
@@ -51,17 +53,31 @@ enum SuspectJobVerifier {
         snapshot: LoadedSnapshot,
         listings: [String: DomainListing],
         details: [ServiceKey: [[String: String]]]?,
-        launchctl: ([String]) throws -> String
+        timeRemaining: () -> Duration,
+        launchctl: ([String], Duration) throws -> String
     ) -> Outcome {
         var outcome = Outcome(jobs: [])
         let soundDomains = Set(listings.filter { $0.value.isStructurallySound }.keys)
+
+        func check(domain: String, label: String) -> Lookup? {
+            let timeout = timeRemaining()
+            guard timeout > .zero else {
+                outcome.skipped += 1
+                return nil
+            }
+            return lookup(domain: domain, label: label) { try launchctl($0, timeout) }
+        }
 
         for job in snapshot.jobs where soundDomains.contains(job.domain) {
             guard job.detailsTampered || job.rowSuspect else {
                 outcome.jobs.append(job)
                 continue
             }
-            switch lookup(domain: job.domain, label: job.label, launchctl: launchctl) {
+            switch check(domain: job.domain, label: job.label) {
+            case nil:
+                var unchecked = job
+                unchecked.rowSuspect = true
+                outcome.jobs.append(unchecked)
             case .found(let fields):
                 // The listing is sound, so its PID and status stand, unless this label was listed twice, in which
                 // case the PID column can't be trusted and running comes from launchd's direct `state`.
@@ -85,7 +101,7 @@ enum SuspectJobVerifier {
             var candidates = Set(listings[domain]?.services.keys ?? [:].keys)
             for key in details?.keys ?? [:].keys where key.domain == domain { candidates.insert(key.label) }
             for label in candidates.sorted() {
-                switch lookup(domain: domain, label: label, launchctl: launchctl) {
+                switch check(domain: domain, label: label) {
                 case .found(let fields):
                     // No trustworthy PID column here; `state` is printed before any nested block.
                     outcome.jobs.append(LoadedJob(
@@ -98,7 +114,7 @@ enum SuspectJobVerifier {
                     if let job = snapshot.jobs.first(where: { $0.domain == domain && $0.label == label }) {
                         outcome.jobs.append(job)
                     }
-                case .failed:
+                case .failed, nil:
                     // No answer either way. Keep it visible as suspect, whether it came from the listing or only
                     // from a dump header (a job the forgery may have hidden).
                     outcome.jobs.append(snapshot.jobs.first { $0.domain == domain && $0.label == label }

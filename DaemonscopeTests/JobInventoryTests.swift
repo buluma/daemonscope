@@ -85,6 +85,17 @@ struct JobInventoryTests {
         #expect(entries.first { $0.loaded?.label == "com.example.nofile" }?.disk == nil)
     }
 
+    @Test func pathlessJobRequiresServiceManagementEvidenceInExpectedDomain() {
+        let plist = disk("helper", path: "/A.app/agent.plist", location: .appAgents, owningApp: "/A.app")
+        let missingDetails = LoadedJob(domain: "gui/501", label: "helper", path: nil, submittedBy: nil,
+            type: nil, state: nil, pid: 2, program: nil, lastExit: nil, parentBundleID: nil)
+        for job in [missingDetails, loaded("helper", domain: "system", path: nil)] {
+            let entries = JobInventory.merge(disk: [plist], loaded: LoadedSnapshot(jobs: [job], disabled: [:]), uid: 501)
+            #expect(entries.count == 2)
+            #expect(entries.first { $0.loaded != nil }?.disk == nil)
+        }
+    }
+
     @Test func submittedJobMatchesUniqueAppBundledPlistByLabel() {
         let app = "/Applications/Tool.app"
         let entries = JobInventory.merge(

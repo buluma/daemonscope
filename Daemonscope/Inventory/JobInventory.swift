@@ -55,7 +55,7 @@ enum JobInventory {
     ///
     /// A loaded job is linked to a plist only when launchd reports that plist's path or its symlink target, or,
     /// for jobs submitted through Service Management (no path), when exactly one app-bundled plist has the
-    /// same label.
+    /// same label and expects that domain.
     static func merge(disk: [DiskJob], loaded: LoadedSnapshot?, uid: uid_t) -> [InventoryEntry] {
         guard let loaded else {
             return disk.map { InventoryEntry(disk: $0, loaded: nil, disabledOverride: nil, state: .unknown) }
@@ -71,7 +71,9 @@ enum JobInventory {
             var match: DiskJob?
             if let path = job.path {
                 match = byPath[path]
-            } else if let candidates = appBundledByLabel[job.label], candidates.count == 1 {
+            } else if job.submittedBy?.wholeMatch(of: /\(submitted by smd\.[0-9]+\)/) != nil,
+                      let candidates = appBundledByLabel[job.label], candidates.count == 1,
+                      expectedDomains(for: candidates[0].location, uid: uid).contains(job.domain) {
                 match = candidates[0]
             }
             if let match { matchedPaths.insert(match.path) }
